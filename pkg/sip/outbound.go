@@ -105,8 +105,26 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 
 	tr := TransportFrom(sipConf.transport)
 	contact := c.ContactURI(tr)
+	contactHost := contact.GetHost()
 	if sipConf.host == "" {
-		sipConf.host = contact.GetHost()
+		sipConf.host = contactHost
+	}
+	regProfile, err := c.ensureRegistered(ctx, sipConf)
+	if err != nil {
+		if regProfile == nil || !regProfile.InviteOnRegisterFailure {
+			return nil, err
+		}
+		log.Warnw("SIP registration attempt failed, continuing without registration", err,
+			"address", sipConf.address,
+			"transport", tr,
+			"username", sipConf.user,
+			"registrar", regProfile.Registrar.GetDest(),
+		)
+	}
+	if regProfile != nil {
+		if regProfile.FromDomain != "" && (sipConf.host == "" || sipConf.host == contactHost) {
+			sipConf.host = regProfile.FromDomain
+		}
 	}
 	now := time.Now()
 	call := &outboundCall{
@@ -143,10 +161,10 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	}
 
 	call.mon = c.mon.NewCall(stats.Outbound, sipConf.host, sipConf.address)
-	var err error
 
 	call.media, err = NewMediaPort(tid, call.log, call.mon, &MediaOptions{
 		IP:                  c.sconf.MediaIP,
+		BindIP:              c.sconf.SignalingIPLocal,
 		Ports:               conf.RTPPort,
 		MediaTimeoutInitial: c.conf.MediaTimeoutInitial,
 		MediaTimeout:        c.conf.MediaTimeout,
@@ -237,6 +255,7 @@ func (c *outboundCall) WaitClose(ctx context.Context) error {
 	defer span.End()
 	return c.waitClose(ctx, c.tid)
 }
+
 func (c *outboundCall) waitClose(ctx context.Context, tid traceid.ID) error {
 	ctx = context.WithoutCancel(ctx)
 	defer c.ensureClosed(ctx)
@@ -650,8 +669,17 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
 				info.CallStatusCode = e
 			})
+			c.log.Infow("SIP invite rejected",
+				"status", e.Code,
+				"reason", e.Status,
+				"sdpOffer", string(sdpOfferData),
+			)
 		} else {
 			c.mon.InviteError("other")
+			c.log.Infow("SIP invite failed without SIP status",
+				"error", err,
+				"sdpOffer", string(sdpOfferData),
+			)
 		}
 		c.cc.Close(ctx)
 		c.log.Infow("SIP invite failed", "error", err)
