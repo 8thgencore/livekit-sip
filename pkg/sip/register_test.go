@@ -8,7 +8,14 @@ import (
 	"github.com/icholy/digest"
 	"github.com/stretchr/testify/require"
 
+	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/sipgo/sip"
+)
+
+const (
+	mockRegistrarHost = "registrar.example.com"
+	mockAuthUser      = "test-auth-user"
+	mockAuthPassword  = "test-password"
 )
 
 func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
@@ -21,10 +28,10 @@ func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(ctx, sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -34,7 +41,7 @@ func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
 	require.Nil(t, firstTx.req.GetHeader("Authorization"))
 
 	challenge := digest.Challenge{
-		Realm: "registrar.example.com",
+		Realm: mockRegistrarHost,
 		Nonce: "nonce-1",
 	}
 	unauthorized := sip.NewResponseFromRequest(firstTx.req, sip.StatusUnauthorized, "Unauthorized", nil)
@@ -45,7 +52,7 @@ func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
 	require.Equal(t, sip.REGISTER, secondTx.req.Method)
 	authHeader := secondTx.req.GetHeader("Authorization")
 	require.NotNil(t, authHeader)
-	require.Contains(t, authHeader.Value(), `username="alice"`)
+	require.Contains(t, authHeader.Value(), `username="test-auth-user"`)
 
 	ok := sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)
 	require.NoError(t, secondTx.transaction.SendResponse(ok))
@@ -57,8 +64,8 @@ func TestEnsureRegisteredWithoutCredentialsSkipsRegister(t *testing.T) {
 	sipClient := getCreatedSIPClient(t)
 
 	conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-		address: "registrar.example.com:5060",
-		user:    "alice",
+		address: mockRegistrarHost + ":5060",
+		user:    mockAuthUser,
 	})
 	require.NoError(t, err)
 	require.Nil(t, conf)
@@ -72,18 +79,18 @@ func TestEnsureRegisteredWithoutCredentialsSkipsRegister(t *testing.T) {
 
 func TestResolveRegistrationConfigUsesCallDefaults(t *testing.T) {
 	conf, err := resolveRegistrationConfig(sipOutboundConfig{
-		address: "registrar.example.com:5070",
+		address: mockRegistrarHost + ":5070",
 		host:    "from.example.com",
-		user:    "alice",
-		pass:    "secret",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, conf)
 	require.Equal(t, "sip:registrar.example.com:5070", conf.RegistrarURI)
 	require.Equal(t, "sip:registrar.example.com", conf.AuthURI)
-	require.Equal(t, "alice", conf.AORUser)
-	require.Equal(t, "alice", conf.AuthUsername)
-	require.Equal(t, "alice", conf.ContactUser)
+	require.Equal(t, mockAuthUser, conf.AORUser)
+	require.Equal(t, mockAuthUser, conf.AuthUsername)
+	require.Equal(t, mockAuthUser, conf.ContactUser)
 	require.Equal(t, "from.example.com", conf.FromDomain)
 	require.Equal(t, TransportUDP, conf.Transport)
 	require.Equal(t, defaultRegisterExpiration, conf.Expires)
@@ -94,21 +101,21 @@ func TestResolveRegistrationConfigUsesCallDefaults(t *testing.T) {
 
 func TestResolveRegistrationConfigUsesRegistrarHostAsFromDomainFallback(t *testing.T) {
 	conf, err := resolveRegistrationConfig(sipOutboundConfig{
-		address: "registrar.example.com:5060",
-		user:    "alice",
-		pass:    "secret",
+		address: mockRegistrarHost + ":5060",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, conf)
-	require.Equal(t, "registrar.example.com", conf.FromDomain)
+	require.Equal(t, mockRegistrarHost, conf.FromDomain)
 }
 
 func TestResolveRegistrationConfigUsesTLSAuthURIDefault(t *testing.T) {
 	conf, err := resolveRegistrationConfig(sipOutboundConfig{
-		address:   "registrar.example.com:5061",
-		user:      "alice",
-		pass:      "secret",
-		transport: 2,
+		address:   mockRegistrarHost + ":5061",
+		user:      mockAuthUser,
+		pass:      mockAuthPassword,
+		transport: livekit.SIPTransport_SIP_TRANSPORT_TLS,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, conf)
@@ -118,8 +125,8 @@ func TestResolveRegistrationConfigUsesTLSAuthURIDefault(t *testing.T) {
 
 func TestResolveRegistrationConfigRequiresUser(t *testing.T) {
 	conf, err := resolveRegistrationConfig(sipOutboundConfig{
-		address: "registrar.example.com:5060",
-		pass:    "secret",
+		address: mockRegistrarHost + ":5060",
+		pass:    mockAuthPassword,
 	})
 	require.Nil(t, conf)
 	require.Error(t, err)
@@ -133,10 +140,10 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -146,10 +153,10 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	require.NoError(t, <-done)
 
 	conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-		address: "registrar.example.com:5060",
-		host:    "registrar.example.com",
-		user:    "alice",
-		pass:    "secret",
+		address: mockRegistrarHost + ":5060",
+		host:    mockRegistrarHost,
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, conf)
@@ -168,10 +175,10 @@ func TestEnsureRegisteredUsesResponseExpires(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -184,10 +191,10 @@ func TestEnsureRegisteredUsesResponseExpires(t *testing.T) {
 	done = make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -198,11 +205,11 @@ func TestEnsureRegisteredUsesResponseExpires(t *testing.T) {
 }
 
 func TestRegistrationExpiresPrefersContactExpires(t *testing.T) {
-	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "registrar.example.com"})
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: mockRegistrarHost})
 	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
 	resp.AppendHeader(sip.NewHeader("Expires", "120"))
 	contact := &sip.ContactHeader{
-		Address: sip.Uri{User: "alice", Host: "example.com"},
+		Address: sip.Uri{User: mockAuthUser, Host: "example.com"},
 		Params:  sip.NewParams(),
 	}
 	contact.Params.Add("expires", "20")
@@ -218,10 +225,10 @@ func TestRegistrationBackgroundRefreshesBeforeExpiration(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -243,10 +250,10 @@ func TestEnsureRegisteredStoresSuccessfulRegisterTime(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()
@@ -257,15 +264,15 @@ func TestEnsureRegisteredStoresSuccessfulRegisterTime(t *testing.T) {
 	require.NoError(t, <-done)
 
 	conf, err := resolveRegistrationConfig(sipOutboundConfig{
-		address: "registrar.example.com:5060",
-		host:    "registrar.example.com",
-		user:    "alice",
-		pass:    "secret",
+		address: mockRegistrarHost + ":5060",
+		host:    mockRegistrarHost,
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
 	})
 	require.NoError(t, err)
 
-	age, ok := client.registrationManager.freshSuccessfulRegisterAge(conf.cacheKey(), time.Minute)
-	require.True(t, ok)
+	age, fresh := client.registrationManager.freshSuccessfulRegisterAge(conf.cacheKey(), time.Minute)
+	require.True(t, fresh)
 	require.GreaterOrEqual(t, age, time.Duration(0))
 	require.Less(t, age, time.Minute)
 }
@@ -277,10 +284,10 @@ func TestEnsureRegisteredEnabledConfigDoesNotTreat405AsSkip(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-			address: "registrar.example.com:5060",
-			host:    "registrar.example.com",
-			user:    "alice",
-			pass:    "secret",
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
 		})
 		done <- err
 	}()

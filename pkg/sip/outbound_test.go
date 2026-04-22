@@ -21,17 +21,36 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/livekit/sipgo/sip"
 )
 
+func setOutboundRegisterMode(req interface{ ProtoReflect() protoreflect.Message }, mode outboundRegisterMode) {
+	msg := req.ProtoReflect()
+	unknown := msg.GetUnknown()
+	unknown = protowire.AppendTag(unknown, internalCreateSIPParticipantRegisterModeField, protowire.VarintType)
+	unknown = protowire.AppendVarint(unknown, uint64(mode))
+	msg.SetUnknown(unknown)
+}
+
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
+	const (
+		mockRegisteredUser = "5550101"
+		mockCallToUser     = "5550102"
+		mockSIPHost        = "sip.mock.example"
+	)
+
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
-	req.Username = "0505870"
-	req.Password = "secret"
-	req.Number = "0505870"
+	req.Address = mockSIPHost + ":5060"
+	req.Hostname = ""
+	req.Username = mockRegisteredUser
+	req.Password = "test-password"
+	req.Number = mockRegisteredUser
+	req.CallTo = mockCallToUser
 	req.WaitUntilAnswered = true
 
 	done := make(chan error, 1)
@@ -46,8 +65,15 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NotNil(t, inviteTx.req.From())
+	require.Equal(t, mockRegisteredUser, inviteTx.req.From().Address.User)
+	require.Equal(t, mockSIPHost, inviteTx.req.From().Address.Host)
+	require.Zero(t, inviteTx.req.From().Address.Port)
+	_, hasTransport := inviteTx.req.From().Address.UriParams.Get("transport")
+	require.False(t, hasTransport)
 	require.NotNil(t, inviteTx.req.Contact())
-	require.Equal(t, "0505870", inviteTx.req.Contact().Address.User)
+	require.Equal(t, mockRegisteredUser, inviteTx.req.Contact().Address.User)
+	require.NotZero(t, inviteTx.req.Contact().Address.Port)
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
@@ -56,13 +82,22 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteRetriesTemporaryUnavailableAfterFreshRegister(t *testing.T) {
+func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
+	const (
+		mockRegisteredUser = "5550103"
+		mockCallToUser     = "5550106"
+		mockSIPHost        = "sip.auto-register.example"
+	)
+
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
-	req.Username = "0505870"
-	req.Password = "secret"
-	req.Number = "0505870"
+	req.Address = mockSIPHost + ":5060"
+	req.Hostname = ""
+	req.Username = mockRegisteredUser
+	req.Password = "test-password"
+	req.Number = mockRegisteredUser
+	req.CallTo = mockCallToUser
 	req.WaitUntilAnswered = true
 
 	done := make(chan error, 1)
@@ -75,15 +110,76 @@ func TestOutboundInviteRetriesTemporaryUnavailableAfterFreshRegister(t *testing.
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
 	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
 
-	firstInviteTx := waitTransaction(t, sipClient)
-	require.Equal(t, sip.INVITE, firstInviteTx.req.Method)
-	require.NoError(t, firstInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(firstInviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+	registeredInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
+	require.Equal(t, mockSIPHost, registeredInviteTx.req.From().Address.Host)
+	require.Equal(t, mockRegisteredUser, registeredInviteTx.req.Contact().Address.User)
+	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
-	retryInviteTx := waitTransactionWithTimeout(t, sipClient, 3*time.Second)
-	require.Equal(t, sip.INVITE, retryInviteTx.req.Method)
-	require.Greater(t, retryInviteTx.sequence, firstInviteTx.sequence)
-	require.NoError(t, retryInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(retryInviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+	directInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, directInviteTx.req.Method)
+	require.Equal(t, client.sconf.SignalingIP.String(), directInviteTx.req.From().Address.Host)
+	require.NotZero(t, directInviteTx.req.From().Address.Port)
+	require.Empty(t, directInviteTx.req.Contact().Address.User)
+	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.no-register.example:5060"
+	req.Hostname = ""
+	req.Username = "5550104"
+	req.Password = "test-password"
+	req.Number = "5550104"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NotNil(t, inviteTx.req.From())
+	require.Equal(t, "5550104", inviteTx.req.From().Address.User)
+	require.Equal(t, client.sconf.SignalingIP.String(), inviteTx.req.From().Address.Host)
+	require.NotZero(t, inviteTx.req.From().Address.Port)
+	_, hasTransport := inviteTx.req.From().Address.UriParams.Get("transport")
+	require.True(t, hasTransport)
+	require.NotNil(t, inviteTx.req.Contact())
+	require.Empty(t, inviteTx.req.Contact().Address.User)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteRequiresRegisterWhenConfigured(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.requires-register.example:5060"
+	req.Hostname = ""
+	req.Username = "5550105"
+	req.Password = "test-password"
+	req.Number = "5550105"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeRequired)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
 	require.Error(t, <-done)
 }
 
@@ -106,9 +202,81 @@ func TestOutboundInviteWithoutRegistrationKeepsHostOnlyContact(t *testing.T) {
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	require.Error(t, <-done)
+}
+
+func TestInviteRequestLogFieldsRedactsAuthorization(t *testing.T) {
+	const (
+		mockRegisteredUser = "5550101"
+		mockCallToUser     = "5550102"
+		mockSIPHost        = "sip.mock.example"
+		mockLocalIP        = "192.0.2.10"
+		mockLocalAddr      = mockLocalIP + ":15060"
+		mockDestAddr       = "198.51.100.10:5060"
+	)
+
+	req := sip.NewRequest(sip.INVITE, sip.Uri{
+		User: mockCallToUser,
+		Host: mockSIPHost,
+		UriParams: sip.HeaderParams{
+			{K: "transport", V: "udp"},
+		},
+	})
+	req.SetSource(mockLocalAddr)
+	req.SetDestination(mockDestAddr)
+	req.AppendHeader(&sip.FromHeader{
+		DisplayName: mockRegisteredUser,
+		Address:     sip.Uri{User: mockRegisteredUser, Host: mockSIPHost},
+	})
+	req.AppendHeader(&sip.ToHeader{Address: sip.Uri{User: mockCallToUser, Host: mockSIPHost}})
+	req.AppendHeader(&sip.ContactHeader{Address: sip.Uri{User: mockRegisteredUser, Host: mockLocalIP, Port: 15060}})
+	req.AppendHeader(&sip.ViaHeader{
+		ProtocolName:    "SIP",
+		ProtocolVersion: "2.0",
+		Transport:       "UDP",
+		Host:            mockLocalIP,
+		Port:            15060,
+	})
+	req.AppendHeader(sip.NewHeader("Call-ID", "call-id"))
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: 2, MethodName: sip.INVITE})
+	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	req.AppendHeader(sip.NewHeader("User-Agent", UserAgent))
+	req.AppendHeader(sip.NewHeader("Route", "<sip:proxy.example.com;lr>"))
+	req.AppendHeader(sip.NewHeader("Proxy-Authorization", `Digest username="5550101", response="mock-digest-response"`))
+	req.SetBody([]byte("v=0\r\n"))
+
+	fields := logFieldsMap(inviteRequestLogFields(req))
+	require.Equal(t, "sip:5550102@sip.mock.example;transport=udp", fields["request_uri"])
+	require.Equal(t, mockDestAddr, fields["dest_addr"])
+	require.Equal(t, mockLocalAddr, fields["local_addr"])
+	require.Equal(t, "sip:5550101@sip.mock.example", fields["from_uri"])
+	require.Equal(t, mockRegisteredUser, fields["from_display_name"])
+	require.Equal(t, "sip:5550101@192.0.2.10:15060", fields["contact_uri"])
+	require.Equal(t, mockLocalAddr, fields["via_sent_by"])
+	require.Equal(t, uint32(2), fields["cseq"])
+	require.Equal(t, "application/sdp", fields["content_type"])
+	require.Equal(t, UserAgent, fields["user_agent"])
+	require.Equal(t, false, fields["has_authorization"])
+	require.Equal(t, true, fields["has_proxy_authorization"])
+	require.Equal(t, []string{"<sip:proxy.example.com;lr>"}, fields["route_headers"])
+	headers := fields["headers"].(map[string][]string)
+	require.Equal(t, []string{`"5550101" <sip:5550101@sip.mock.example>`}, headers["From"])
+	require.Equal(t, []string{"<sip:proxy.example.com;lr>"}, headers["Route"])
+	require.NotContains(t, headers, "Proxy-Authorization")
+
+	rendered := fmt.Sprint(inviteRequestLogFields(req))
+	require.NotContains(t, rendered, "mock-digest-response")
+	require.NotContains(t, rendered, "Proxy-Authorization")
+}
+
+func logFieldsMap(fields []interface{}) map[interface{}]interface{} {
+	out := make(map[interface{}]interface{}, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		out[fields[i]] = fields[i+1]
+	}
+	return out
 }
 
 func TestOutboundRouteHeaderWithRecordRoute(t *testing.T) {

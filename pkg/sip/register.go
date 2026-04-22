@@ -27,6 +27,25 @@ const (
 	registerRefreshBackoffMax = 30 * time.Second
 )
 
+type outboundRegisterMode int32
+
+const (
+	outboundRegisterModeAuto outboundRegisterMode = iota
+	outboundRegisterModeDisabled
+	outboundRegisterModeRequired
+)
+
+func (m outboundRegisterMode) String() string {
+	switch m {
+	case outboundRegisterModeDisabled:
+		return "disabled"
+	case outboundRegisterModeRequired:
+		return "required"
+	default:
+		return "auto"
+	}
+}
+
 type ResolvedRegistrationConfig struct {
 	RegistrarURI              string
 	AuthURI                   string

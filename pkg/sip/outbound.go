@@ -21,6 +21,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,26 +67,29 @@ type sipOutboundConfig struct {
 	featureFlags    map[string]string
 	mediaEncryption sdp.Encryption
 	displayName     *string
+	registerMode    outboundRegisterMode
 }
 
 const inviteRetryAfterFreshRegisterDelay = 2 * time.Second
 
 type outboundCall struct {
-	c          *Client
-	tid        traceid.ID
-	log        logger.Logger
-	state      *CallState
-	regProfile *ResolvedRegistrationConfig
-	callStart  time.Time
-	cc         *sipOutbound
-	media      *MediaPort
-	started    core.Fuse
-	stopped    core.Fuse
-	closing    core.Fuse
-	stats      Stats
-	sigTs      SignalingTimestamps
-	jitterBuf  bool
-	projectID  string
+	c             *Client
+	tid           traceid.ID
+	log           logger.Logger
+	state         *CallState
+	regProfile    *ResolvedRegistrationConfig
+	callStart     time.Time
+	cc            *sipOutbound
+	media         *MediaPort
+	started       core.Fuse
+	stopped       core.Fuse
+	closing       core.Fuse
+	stats         Stats
+	sigTs         SignalingTimestamps
+	jitterBuf     bool
+	projectID     string
+	directFrom    URI
+	directContact URI
 
 	mu       sync.RWMutex
 	mon      *stats.CallMonitor
@@ -108,27 +112,40 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 
 	tr := TransportFrom(sipConf.transport)
 	contact := c.ContactURI(tr)
-	defaultHost := CreateURIFromUserAndAddress("", sipConf.address, tr).GetHost()
-	if defaultHost == "" {
-		defaultHost = contact.GetHost()
-	}
+	defaultHost := sipConf.host
 	if sipConf.host == "" {
-		sipConf.host = defaultHost
+		sipConf.host = contact.GetHost()
 	}
-	regProfile, err := c.ensureRegistered(ctx, sipConf)
-	if err != nil {
-		if regProfile == nil || !regProfile.InviteOnRegisterFailure {
-			return nil, err
+	directContact := contact
+	directFrom := URI{
+		User:      sipConf.from,
+		Host:      sipConf.host,
+		Addr:      directContact.Addr,
+		Transport: tr,
+	}
+	var regProfile *ResolvedRegistrationConfig
+	if sipConf.registerMode != outboundRegisterModeDisabled {
+		var err error
+		regSipConf := sipConf
+		regSipConf.host = defaultHost
+		regProfile, err = c.ensureRegistered(ctx, regSipConf)
+		if sipConf.registerMode == outboundRegisterModeRequired && regProfile == nil && err == nil {
+			err = psrpc.NewError(psrpc.InvalidArgument, errors.New("sip registration requires address, username, and password"))
 		}
-		log.Warnw("SIP registration attempt failed, continuing without registration", err,
-			"address", sipConf.address,
-			"transport", tr,
-			"username", sipConf.user,
-			"registrar", regProfile.Registrar.GetDest(),
-		)
+		if err != nil {
+			if sipConf.registerMode == outboundRegisterModeRequired || regProfile == nil || !regProfile.InviteOnRegisterFailure {
+				return nil, err
+			}
+			log.Warnw("SIP registration attempt failed, continuing without registration", err,
+				"address", sipConf.address,
+				"transport", tr,
+				"username", sipConf.user,
+				"registrar", regProfile.Registrar.GetDest(),
+			)
+		}
 	}
 	if regProfile != nil {
-		if regProfile.FromDomain != "" && (sipConf.host == "" || sipConf.host == defaultHost) {
+		if regProfile.FromDomain != "" && defaultHost == "" {
 			sipConf.host = regProfile.FromDomain
 		}
 		if regProfile.ContactUser != "" {
@@ -136,26 +153,35 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		}
 	}
 	now := time.Now()
-	call := &outboundCall{
-		c:          c,
-		tid:        tid,
-		log:        log,
-		sipConf:    sipConf,
-		state:      state,
-		regProfile: regProfile,
-		callStart:  now,
-		sigTs:      SignalingTimestamps{APITime: now},
-		jitterBuf:  jitterBuf,
-		projectID:  projectID,
-	}
-	call.stats.Update()
-	call.log = call.log.WithValues("jitterBuf", call.jitterBuf)
-	call.cc = c.newOutbound(log, id, URI{
+	from := URI{
 		User:      sipConf.from,
 		Host:      sipConf.host,
 		Addr:      contact.Addr,
 		Transport: tr,
-	}, contact, sipConf.displayName, func(headers map[string]string) map[string]string {
+	}
+	if regProfile != nil {
+		from = URI{
+			User: sipConf.from,
+			Host: sipConf.host,
+		}
+	}
+	call := &outboundCall{
+		c:             c,
+		tid:           tid,
+		log:           log,
+		sipConf:       sipConf,
+		state:         state,
+		regProfile:    regProfile,
+		callStart:     now,
+		sigTs:         SignalingTimestamps{APITime: now},
+		jitterBuf:     jitterBuf,
+		projectID:     projectID,
+		directFrom:    directFrom,
+		directContact: directContact,
+	}
+	call.stats.Update()
+	call.log = call.log.WithValues("jitterBuf", call.jitterBuf)
+	call.cc = c.newOutbound(log, id, from, contact, sipConf.displayName, func(headers map[string]string) map[string]string {
 		c := call
 		if len(c.sipConf.attrsToHeaders) == 0 {
 			return headers
@@ -172,6 +198,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 
 	call.mon = c.mon.NewCall(stats.Outbound, sipConf.host, sipConf.address)
 
+	var err error
 	call.media, err = NewMediaPort(tid, call.log, call.mon, &MediaOptions{
 		IP:                  c.sconf.MediaIP,
 		BindIP:              c.sconf.SignalingIPLocal,
@@ -646,7 +673,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 	toUri := CreateURIFromUserAndAddress(c.sipConf.to, c.sipConf.address, TransportFrom(c.sipConf.transport))
 
 	ringing := false
-	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, func(code sip.StatusCode, hdrs Headers) {
+	setState := func(code sip.StatusCode, hdrs Headers) {
 		if code == sip.StatusOK {
 			return // is set separately
 		}
@@ -659,7 +686,11 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			c.setStatus(CallRinging)
 		}
 		c.setExtraAttrs(nil, 0, nil, hdrs)
-	})
+	}
+	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	if c.shouldRetryInviteWithoutRegistration(err) {
+		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState)
+	}
 	// Update SIPCallInfo with the SIP Call-ID after Invite
 	if sipCallID := c.cc.SIPCallID(); sipCallID != "" {
 		c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
@@ -730,6 +761,29 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		}
 	})
 	return nil
+}
+
+func (c *outboundCall) shouldRetryInviteWithoutRegistration(err error) bool {
+	if c == nil || c.regProfile == nil || c.sipConf.registerMode != outboundRegisterModeAuto {
+		return false
+	}
+	var sipErr *livekit.SIPStatus
+	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
+}
+
+func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
+	c.log.Infow("retrying SIP INVITE without outbound REGISTER profile",
+		"retry_reason", "registered_invite_busy_here",
+		"registerMode", c.sipConf.registerMode.String(),
+	)
+	c.cc.Close(ctx)
+	getHeaders := c.cc.getHeaders
+	nextCSeq := c.cc.nextCSeq
+	c.cc = c.c.newOutbound(c.log, c.cc.ID(), c.directFrom, c.directContact, c.sipConf.displayName, getHeaders)
+	c.cc.nextCSeq = nextCSeq
+	c.regProfile = nil
+	c.mon.InviteReq()
+	return c.cc.Invite(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
 }
 
 func (c *outboundCall) handleDTMF(ev dtmf.Event) {
@@ -1153,6 +1207,7 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 		return nil, nil, err
 	}
 	defer tx.Terminate()
+	c.log.Infow("SIP INVITE request prepared", inviteRequestLogFields(req)...)
 
 	// Log the actual local port used for TCP connections from the DialPort range
 	if req.Transport() == "TCP" {
@@ -1191,6 +1246,96 @@ func (c *sipOutbound) logInviteFinalResponse(resp *sip.Response) {
 		}
 	}
 	c.log.Infow("SIP INVITE final response received", fields...)
+}
+
+func inviteRequestLogFields(req *sip.Request) []interface{} {
+	fields := []interface{}{
+		"method", req.Method,
+		"request_uri", req.Recipient.String(),
+		"transport", req.Transport(),
+		"dest_addr", req.Destination(),
+		"local_addr", req.Source(),
+		"content_length", len(req.Body()),
+	}
+	if h := req.From(); h != nil {
+		fields = append(fields,
+			"from_uri", h.Address.String(),
+			"from_display_name", h.DisplayName,
+		)
+	}
+	if h := req.To(); h != nil {
+		fields = append(fields,
+			"to_uri", h.Address.String(),
+			"to_display_name", h.DisplayName,
+		)
+	}
+	if h := req.Contact(); h != nil {
+		fields = append(fields, "contact_uri", h.Address.String())
+	}
+	if h := req.Via(); h != nil {
+		fields = append(fields,
+			"via_sent_by", h.SentBy(),
+			"via_transport", h.Transport,
+		)
+	}
+	if h := req.CallID(); h != nil {
+		fields = append(fields, "sip_call_id", h.Value())
+	}
+	if h := req.CSeq(); h != nil {
+		fields = append(fields,
+			"cseq", h.SeqNo,
+			"cseq_method", h.MethodName,
+		)
+	}
+	if h := req.ContentType(); h != nil {
+		fields = append(fields, "content_type", h.Value())
+	}
+	if h := req.GetHeader("User-Agent"); h != nil {
+		fields = append(fields, "user_agent", h.Value())
+	}
+	fields = append(fields,
+		"has_authorization", req.GetHeader("Authorization") != nil,
+		"has_proxy_authorization", req.GetHeader("Proxy-Authorization") != nil,
+		"headers", sanitizedHeaderValues(req.Headers()),
+	)
+	if routes := headerValues(req.GetHeaders("Route")); len(routes) != 0 {
+		fields = append(fields, "route_headers", routes)
+	}
+	if reasons := headerValues(req.GetHeaders("Reason")); len(reasons) != 0 {
+		fields = append(fields, "reason_headers", reasons)
+	}
+	return fields
+}
+
+func sanitizedHeaderValues(headers []sip.Header) map[string][]string {
+	out := make(map[string][]string, len(headers))
+	for _, h := range headers {
+		name := h.Name()
+		if isSensitiveSIPHeader(name) {
+			continue
+		}
+		out[name] = append(out[name], h.Value())
+	}
+	return out
+}
+
+func isSensitiveSIPHeader(name string) bool {
+	name = strings.ToLower(name)
+	return name == "authorization" ||
+		name == "proxy-authorization" ||
+		name == "www-authenticate" ||
+		name == "proxy-authenticate"
+}
+
+func headerValues(headers []sip.Header) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(headers))
+	for _, h := range headers {
+		values = append(values, h.Value())
+	}
+	return values
 }
 
 func (c *sipOutbound) WriteRequest(req *sip.Request) error {
