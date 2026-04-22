@@ -25,6 +25,92 @@ import (
 	"github.com/livekit/sipgo/sip"
 )
 
+func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Username = "0505870"
+	req.Password = "secret"
+	req.Number = "0505870"
+	req.WaitUntilAnswered = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NotNil(t, inviteTx.req.Contact())
+	require.Equal(t, "0505870", inviteTx.req.Contact().Address.User)
+	userAgent := inviteTx.req.GetHeader("User-Agent")
+	require.NotNil(t, userAgent)
+	require.Equal(t, UserAgent, userAgent.Value())
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteRetriesTemporaryUnavailableAfterFreshRegister(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Username = "0505870"
+	req.Password = "secret"
+	req.Number = "0505870"
+	req.WaitUntilAnswered = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+	firstInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, firstInviteTx.req.Method)
+	require.NoError(t, firstInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(firstInviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+
+	retryInviteTx := waitTransactionWithTimeout(t, sipClient, 3*time.Second)
+	require.Equal(t, sip.INVITE, retryInviteTx.req.Method)
+	require.Greater(t, retryInviteTx.sequence, firstInviteTx.sequence)
+	require.NoError(t, retryInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(retryInviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteWithoutRegistrationKeepsHostOnlyContact(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.WaitUntilAnswered = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NotNil(t, inviteTx.req.Contact())
+	require.Empty(t, inviteTx.req.Contact().Address.User)
+	userAgent := inviteTx.req.GetHeader("User-Agent")
+	require.NotNil(t, userAgent)
+	require.Equal(t, UserAgent, userAgent.Value())
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusTemporarilyUnavailable, "Temporarily Unavailable", nil)))
+
+	require.Error(t, <-done)
+}
+
 func TestOutboundRouteHeaderWithRecordRoute(t *testing.T) {
 	// Make sure the ACK doesn't carry over initial Route header.
 	// Steps:

@@ -161,6 +161,115 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	}
 }
 
+func TestEnsureRegisteredUsesResponseExpires(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "registrar.example.com:5060",
+			host:    "registrar.example.com",
+			user:    "alice",
+			pass:    "secret",
+		})
+		done <- err
+	}()
+	tx := waitTransaction(t, sipClient)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "20"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+	require.NoError(t, <-done)
+
+	done = make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "registrar.example.com:5060",
+			host:    "registrar.example.com",
+			user:    "alice",
+			pass:    "secret",
+		})
+		done <- err
+	}()
+	tx = waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
+func TestRegistrationExpiresPrefersContactExpires(t *testing.T) {
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "registrar.example.com"})
+	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
+	resp.AppendHeader(sip.NewHeader("Expires", "120"))
+	contact := &sip.ContactHeader{
+		Address: sip.Uri{User: "alice", Host: "example.com"},
+		Params:  sip.NewParams(),
+	}
+	contact.Params.Add("expires", "20")
+	resp.AppendHeader(contact)
+
+	require.Equal(t, 20*time.Second, registrationExpires(resp, defaultRegisterExpiration))
+}
+
+func TestRegistrationBackgroundRefreshesBeforeExpiration(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "registrar.example.com:5060",
+			host:    "registrar.example.com",
+			user:    "alice",
+			pass:    "secret",
+		})
+		done <- err
+	}()
+	tx := waitTransaction(t, sipClient)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "1"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+	require.NoError(t, <-done)
+
+	tx = waitTransactionWithTimeout(t, sipClient, 2*time.Second)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+}
+
+func TestEnsureRegisteredStoresSuccessfulRegisterTime(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "registrar.example.com:5060",
+			host:    "registrar.example.com",
+			user:    "alice",
+			pass:    "secret",
+		})
+		done <- err
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	require.NoError(t, tx.transaction.SendResponse(ok))
+	require.NoError(t, <-done)
+
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: "registrar.example.com:5060",
+		host:    "registrar.example.com",
+		user:    "alice",
+		pass:    "secret",
+	})
+	require.NoError(t, err)
+
+	age, ok := client.registrationManager.freshSuccessfulRegisterAge(conf.cacheKey(), time.Minute)
+	require.True(t, ok)
+	require.GreaterOrEqual(t, age, time.Duration(0))
+	require.Less(t, age, time.Minute)
+}
+
 func TestEnsureRegisteredEnabledConfigDoesNotTreat405AsSkip(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
@@ -195,12 +304,16 @@ func getCreatedSIPClient(t *testing.T) *testSIPClient {
 }
 
 func waitTransaction(t *testing.T, sipClient *testSIPClient) *transactionRequest {
+	return waitTransactionWithTimeout(t, sipClient, 500*time.Millisecond)
+}
+
+func waitTransactionWithTimeout(t *testing.T, sipClient *testSIPClient, timeout time.Duration) *transactionRequest {
 	t.Helper()
 	select {
 	case tx := <-sipClient.transactions:
 		t.Cleanup(func() { tx.transaction.Terminate() })
 		return tx
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(timeout):
 		t.Fatal("expected SIP transaction")
 		return nil
 	}
