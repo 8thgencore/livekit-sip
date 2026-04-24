@@ -1040,7 +1040,7 @@ authLoop:
 			sip.StatusNotAcceptableHere,
 			sip.StatusBusyHere:
 			if !inviteRetried {
-				retried, err := c.retryInviteAfterFreshRegister(ctx, regProfile, resp)
+				retried, err := c.retryInviteAfterFreshRegister(ctx, regProfile, pass, resp)
 				if err != nil {
 					return nil, err
 				}
@@ -1127,7 +1127,7 @@ authLoop:
 	return c.inviteOk.Body(), nil
 }
 
-func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProfile *ResolvedRegistrationConfig, resp *sip.Response) (bool, error) {
+func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProfile *ResolvedRegistrationConfig, password string, resp *sip.Response) (bool, error) {
 	if c == nil || c.c == nil || c.c.registrationManager == nil || regProfile == nil || resp == nil {
 		return false, nil
 	}
@@ -1148,6 +1148,13 @@ func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProf
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		c.log.Infow("forcing SIP REGISTER before INVITE retry",
+			"retry_reason", "fresh_register_temporary_failure",
+			"original_status", resp.StatusCode,
+		)
+		if err := c.c.forceRegister(ctx, regProfile, password); err != nil {
+			return false, err
+		}
 		return true, nil
 	case <-ctx.Done():
 		return false, ctx.Err()

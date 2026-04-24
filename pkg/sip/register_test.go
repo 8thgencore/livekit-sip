@@ -168,6 +168,37 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	}
 }
 
+func TestForceRegisterBypassesCachedRegistration(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: mockRegistrarHost + ":5060",
+		host:    mockRegistrarHost,
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.forceRegister(context.Background(), conf, mockAuthPassword)
+	}()
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+
+	done = make(chan error, 1)
+	go func() {
+		done <- client.forceRegister(context.Background(), conf, mockAuthPassword)
+	}()
+	tx = waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
 func TestEnsureRegisteredUsesResponseExpires(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

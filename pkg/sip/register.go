@@ -329,6 +329,18 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 	return conf, c.registrationManager.ensure(ctx, c, conf, sipConf.pass, contact)
 }
 
+func (c *Client) forceRegister(ctx context.Context, conf *ResolvedRegistrationConfig, password string) error {
+	if c == nil || c.sipCli == nil || c.sconf == nil || conf == nil {
+		return nil
+	}
+	forceConf := conf.clone()
+	forceConf.AlwaysRefreshBeforeInvite = true
+
+	contact := c.ContactURI(forceConf.Transport)
+	contact.User = forceConf.ContactUser
+	return c.registrationManager.ensure(ctx, c, forceConf, password, contact)
+}
+
 func resolveRegistrationConfig(sipConf sipOutboundConfig) (*ResolvedRegistrationConfig, error) {
 	conf := &ResolvedRegistrationConfig{
 		InviteOnRegisterFailure:   true,

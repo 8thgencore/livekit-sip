@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/livekit/protocol/logger"
 	"github.com/livekit/sipgo/sip"
 )
 
@@ -124,6 +125,58 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	require.Error(t, <-done)
+}
+
+func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status sip.StatusCode
+		reason string
+	}{
+		{name: "temporarily unavailable", status: sip.StatusTemporarilyUnavailable, reason: "Temporarily Unavailable"},
+		{name: "service unavailable", status: sip.StatusServiceUnavailable, reason: "Service Unavailable"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewOutboundTestClient(t, TestClientConfig{})
+			sipClient := getCreatedSIPClient(t)
+
+			conf, err := resolveRegistrationConfig(sipOutboundConfig{
+				address: "sip.retry-register.example:5060",
+				host:    "sip.retry-register.example",
+				user:    "5550107",
+				pass:    "test-password",
+			})
+			require.NoError(t, err)
+			client.registrationManager.markSuccessfulRegister(conf.cacheKey(), time.Now())
+
+			outbound := &sipOutbound{
+				c:   client,
+				log: logger.GetLogger(),
+			}
+			req := sip.NewRequest(sip.INVITE, sip.Uri{Host: "sip.retry-register.example"})
+			resp := sip.NewResponseFromRequest(req, tc.status, tc.reason, nil)
+
+			type result struct {
+				retried bool
+				err     error
+			}
+			done := make(chan result, 1)
+			go func() {
+				retried, err := outbound.retryInviteAfterFreshRegister(context.Background(), conf, "test-password", resp)
+				done <- result{retried: retried, err: err}
+			}()
+
+			registerTx := waitTransactionWithTimeout(t, sipClient, 3*time.Second)
+			require.Equal(t, sip.REGISTER, registerTx.req.Method)
+			require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+			res := <-done
+			require.NoError(t, res.err)
+			require.True(t, res.retried)
+		})
+	}
 }
 
 func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
