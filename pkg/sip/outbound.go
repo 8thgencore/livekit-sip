@@ -72,6 +72,11 @@ type sipOutboundConfig struct {
 
 const inviteRetryAfterFreshRegisterDelay = 2 * time.Second
 
+var outboundRegisterSkipHosts = map[string]struct{}{
+	"novofon.ru":     {},
+	"sip.novofon.ru": {},
+}
+
 type outboundCall struct {
 	c             *Client
 	tid           traceid.ID
@@ -96,6 +101,16 @@ type outboundCall struct {
 	lkRoom   RoomInterface
 	lkRoomIn msdk.PCM16Writer // output to room; OPUS at 48k
 	sipConf  sipOutboundConfig
+}
+
+func shouldSkipRegistrationForAddress(address string) bool {
+	host := address
+	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
+		host = parsedHost
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	_, ok := outboundRegisterSkipHosts[host]
+	return ok
 }
 
 func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Config, log logger.Logger, id LocalTag, room RoomConfig, sipConf sipOutboundConfig, state *CallState, projectID string) (*outboundCall, error) {
@@ -124,7 +139,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		Transport: tr,
 	}
 	var regProfile *ResolvedRegistrationConfig
-	if sipConf.registerMode != outboundRegisterModeDisabled {
+	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto && shouldSkipRegistrationForAddress(sipConf.address)) {
 		var err error
 		regSipConf := sipConf
 		regSipConf.host = defaultHost
@@ -1016,7 +1031,7 @@ func (c *sipOutbound) Invite(ctx context.Context, to URI, regProfile *ResolvedRe
 	inviteRetried := false
 authLoop:
 	for try := 0; ; try++ {
-		if try >= 5 {
+		if try >= inviteAuthMaxAttempts {
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
 		}
 		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState)

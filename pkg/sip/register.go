@@ -25,6 +25,8 @@ const (
 	registerRefreshBackoffMin = 5 * time.Second
 	registerRefreshBackoffMid = 15 * time.Second
 	registerRefreshBackoffMax = 30 * time.Second
+	registerAuthMaxAttempts   = 3
+	inviteAuthMaxAttempts     = 3
 )
 
 type outboundRegisterMode int32
@@ -384,7 +386,7 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 	authHeaderValue := ""
 	cacheKey := conf.cacheKey()
 
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < registerAuthMaxAttempts; attempt++ {
 		req := c.newRegisterRequest(conf, contact, fromTag, uint32(attempt+1), callID, authHeaderName, authHeaderValue)
 		c.log.Infow("sending SIP REGISTER",
 			"attempt", attempt+1,

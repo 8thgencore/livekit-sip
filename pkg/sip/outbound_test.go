@@ -212,6 +212,30 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.Error(t, <-done)
 }
 
+func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.novofon.ru:5060"
+	req.Hostname = ""
+	req.Username = "5550104"
+	req.Password = "test-password"
+	req.Number = "5550104"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.Error(t, <-done)
+}
+
 func TestOutboundInviteRequiresRegisterWhenConfigured(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
