@@ -25,7 +25,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/icholy/digest"
+	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/sip/pkg/stats"
 	"github.com/livekit/sipgo/sip"
 )
 
@@ -35,6 +37,35 @@ func setOutboundRegisterMode(req interface{ ProtoReflect() protoreflect.Message 
 	unknown = protowire.AppendTag(unknown, internalCreateSIPParticipantRegisterModeField, protowire.VarintType)
 	unknown = protowire.AppendVarint(unknown, uint64(mode))
 	msg.SetUnknown(unknown)
+}
+
+func newTestOutboundCall(client *Client) *outboundCall {
+	contact := client.ContactURI(TransportUDP)
+	from := URI{
+		User:      "0101536",
+		Host:      client.sconf.SignalingIP.String(),
+		Addr:      contact.Addr,
+		Transport: TransportUDP,
+	}
+	call := &outboundCall{
+		c:       client,
+		log:     logger.GetLogger(),
+		sipConf: sipOutboundConfig{user: "0101536", pass: "test-password"},
+		mon:     client.mon.NewCall(stats.Outbound, "sip.novofon.ru", "sip.novofon.ru:5060"),
+	}
+	call.cc = client.newOutbound(call.log, LocalTag("test-call-id"), from, contact, nil, nil)
+	return call
+}
+
+func sendProxyAuthRequired(t *testing.T, tx *transactionRequest) {
+	t.Helper()
+	challenge := digest.Challenge{
+		Realm: "sip.nvfn.ru",
+		Nonce: "12345678901234567890123456789012",
+	}
+	resp := sip.NewResponseFromRequest(tx.req, sip.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
+	resp.AppendHeader(sip.NewHeader("Proxy-Authenticate", challenge.String()))
+	require.NoError(t, tx.transaction.SendResponse(resp))
 }
 
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
@@ -178,6 +209,91 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 			require.True(t, res.retried)
 		})
 	}
+}
+
+func TestRetryInviteAfterBusyUsesFreshCallIDAndHandlesAuth(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	toURI := CreateURIFromUserAndAddress("+79993441100", "sip.novofon.ru:5060", TransportUDP)
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "0101536", "test-password", nil, []byte("v=0\r\n"), nil)
+		firstResult <- err
+	}()
+
+	firstInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, firstInvite.req.Method)
+	firstCallID := firstInvite.req.CallID().Value()
+	require.Equal(t, uint32(1), firstInvite.req.CSeq().SeqNo)
+	require.Nil(t, firstInvite.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, firstInvite)
+
+	firstAuthInvite := waitTransaction(t, sipClient)
+	require.Equal(t, firstCallID, firstAuthInvite.req.CallID().Value())
+	require.Equal(t, uint32(2), firstAuthInvite.req.CSeq().SeqNo)
+	require.NotNil(t, firstAuthInvite.req.GetHeader("Proxy-Authorization"))
+	require.NoError(t, firstAuthInvite.transaction.SendResponse(sip.NewResponseFromRequest(firstAuthInvite.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	firstErr := <-firstResult
+	require.Error(t, firstErr)
+	require.True(t, outbound.shouldRetryInviteAfterBusy(firstErr))
+
+	retryResult := make(chan struct {
+		body []byte
+		err  error
+	}, 1)
+	go func() {
+		body, err := outbound.retryInviteAfterBusy(context.Background(), toURI, []byte("v=0\r\n"), nil)
+		retryResult <- struct {
+			body []byte
+			err  error
+		}{body: body, err: err}
+	}()
+
+	retryInvite := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
+	require.Equal(t, sip.INVITE, retryInvite.req.Method)
+	retryCallID := retryInvite.req.CallID().Value()
+	require.NotEqual(t, firstCallID, retryCallID)
+	require.Equal(t, uint32(1), retryInvite.req.CSeq().SeqNo)
+	require.Nil(t, retryInvite.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, retryInvite)
+
+	retryAuthInvite := waitTransaction(t, sipClient)
+	require.Equal(t, retryCallID, retryAuthInvite.req.CallID().Value())
+	require.Equal(t, uint32(2), retryAuthInvite.req.CSeq().SeqNo)
+	require.NotNil(t, retryAuthInvite.req.GetHeader("Proxy-Authorization"))
+	answer := []byte("v=0\r\n")
+	require.NoError(t, retryAuthInvite.transaction.SendResponse(sip.NewResponseFromRequest(retryAuthInvite.req, sip.StatusOK, "OK", answer)))
+
+	res := <-retryResult
+	require.NoError(t, res.err)
+	require.Equal(t, answer, res.body)
+}
+
+func TestRetryInviteAfterBusyReturnsSecondBusy(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	toURI := CreateURIFromUserAndAddress("+79993441100", "sip.novofon.ru:5060", TransportUDP)
+
+	retryResult := make(chan error, 1)
+	go func() {
+		_, err := outbound.retryInviteAfterBusy(context.Background(), toURI, []byte("v=0\r\n"), nil)
+		retryResult <- err
+	}()
+
+	retryInvite := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
+	require.Equal(t, sip.INVITE, retryInvite.req.Method)
+	require.Equal(t, uint32(1), retryInvite.req.CSeq().SeqNo)
+	require.NoError(t, retryInvite.transaction.SendResponse(sip.NewResponseFromRequest(retryInvite.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	err := <-retryResult
+	require.Error(t, err)
+	var sipErr *livekit.SIPStatus
+	require.ErrorAs(t, err, &sipErr)
+	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE, sipErr.Code)
 }
 
 func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {

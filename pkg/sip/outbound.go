@@ -72,7 +72,10 @@ type sipOutboundConfig struct {
 	registerMode    outboundRegisterMode
 }
 
-const inviteRetryAfterFreshRegisterDelay = 2 * time.Second
+const (
+	inviteRetryAfterFreshRegisterDelay = 2 * time.Second
+	inviteRetryAfterBusyDelay          = 2 * time.Second
+)
 
 var outboundRegisterSkipHosts = map[string]struct{}{
 	"novofon.ru":     {},
@@ -708,8 +711,14 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		c.setExtraAttrs(nil, 0, nil, hdrs)
 	}
 	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	inviteRetried := false
 	if c.shouldRetryInviteWithoutRegistration(err) {
+		inviteRetried = true
 		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState)
+	}
+	if !inviteRetried && c.shouldRetryInviteAfterBusy(err) {
+		inviteRetried = true
+		sdpResp, err = c.retryInviteAfterBusy(ctx, toUri, sdpOfferData, setState)
 	}
 	// Update SIPCallInfo with the SIP Call-ID after Invite
 	if sipCallID := c.cc.SIPCallID(); sipCallID != "" {
@@ -804,6 +813,47 @@ func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri
 	c.regProfile = nil
 	c.mon.InviteReq()
 	return c.cc.Invite(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+}
+
+func (c *outboundCall) shouldRetryInviteAfterBusy(err error) bool {
+	if c == nil || c.closing.IsBroken() {
+		return false
+	}
+	var sipErr *livekit.SIPStatus
+	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
+}
+
+func (c *outboundCall) retryInviteAfterBusy(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
+	previousSIPCallID := ""
+	if c.cc != nil {
+		previousSIPCallID = c.cc.SIPCallID()
+	}
+	c.log.Infow("retrying SIP INVITE after busy response",
+		"original_status", sip.StatusBusyHere,
+		"retry_attempt", 1,
+		"retry_delay_ms", inviteRetryAfterBusyDelay.Milliseconds(),
+		"previous_sip_call_id", previousSIPCallID,
+		"to", toUri.GetURI().String(),
+	)
+	timer := time.NewTimer(inviteRetryAfterBusyDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closing.Watch():
+		return nil, errors.New("outbound call closing")
+	case <-c.c.closing.Watch():
+		return nil, errors.New("SIP client closed")
+	}
+	c.mon.InviteReq()
+	sdpResp, err := c.cc.InviteWithFreshCallID(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	if err != nil {
+		c.log.Infow("SIP INVITE busy retry failed", "error", err)
+		return nil, err
+	}
+	c.log.Infow("SIP INVITE busy retry succeeded", "sipCallID", c.cc.SIPCallID())
+	return sdpResp, nil
 }
 
 func (c *outboundCall) handleDTMF(ev dtmf.Event) {
@@ -1010,13 +1060,26 @@ func (c *sipOutbound) RemoteHeaders() Headers {
 }
 
 func (c *sipOutbound) Invite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, false)
+}
+
+func (c *sipOutbound) InviteWithFreshCallID(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, true)
+}
+
+func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, freshCallID bool) ([]byte, error) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.Invite")
 	defer span.End()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	toHeader := &sip.ToHeader{Address: *to.GetURI()}
 
-	c.callID = guid.HashedID(fmt.Sprintf("%s-%s", string(c.id), toHeader.Address.String()))
+	if freshCallID {
+		c.callID = guid.New("call_")
+		c.nextCSeq = 1
+	} else {
+		c.callID = guid.HashedID(fmt.Sprintf("%s-%s", string(c.id), toHeader.Address.String()))
+	}
 	c.log = c.log.WithValues("sipCallID", c.callID)
 
 	var (
