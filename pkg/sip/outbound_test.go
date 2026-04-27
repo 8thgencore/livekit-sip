@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/icholy/digest"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/sipgo/sip"
 )
@@ -346,6 +347,68 @@ func TestInviteRequestLogFieldsRedactsAuthorization(t *testing.T) {
 	rendered := fmt.Sprint(inviteRequestLogFields(req))
 	require.NotContains(t, rendered, "mock-digest-response")
 	require.NotContains(t, rendered, "Proxy-Authorization")
+}
+
+func TestInviteAuthLogFieldsAreSanitized(t *testing.T) {
+	const (
+		rawNonce       = "raw-provider-nonce"
+		rawResponse    = "raw-digest-response"
+		rawPassword    = "secret-password"
+		rawCnonce      = "raw-client-nonce"
+		authHeaderName = "Proxy-Authenticate"
+		respHeaderName = "Proxy-Authorization"
+	)
+
+	challenge := &digest.Challenge{
+		Realm:     "novofon",
+		Nonce:     rawNonce,
+		Opaque:    "opaque-value",
+		Algorithm: "MD5",
+		QOP:       []string{"auth"},
+		Domain:    []string{"sip:sip.novofon.ru"},
+	}
+	req := sip.NewRequest(sip.INVITE, sip.Uri{
+		User: "+79993441100",
+		Host: "sip.novofon.ru",
+	})
+	cred := &digest.Credentials{
+		Username:  "0101536",
+		URI:       "sip:+79993441100@sip.novofon.ru",
+		Cnonce:    rawCnonce,
+		Nc:        1,
+		Realm:     "novofon",
+		Nonce:     rawNonce,
+		Algorithm: "MD5",
+		QOP:       "auth",
+		Response:  rawResponse,
+	}
+
+	challengeFields := inviteAuthChallengeLogFields(sip.StatusProxyAuthRequired, authHeaderName, respHeaderName, challenge)
+	responseFields := inviteAuthResponseLogFields(respHeaderName, req, cred, cred.URI)
+	allFields := append(challengeFields, responseFields...)
+	challengeLog := logFieldsMap(challengeFields)
+	responseLog := logFieldsMap(responseFields)
+
+	require.Equal(t, sip.StatusProxyAuthRequired, challengeLog["status"])
+	require.Equal(t, authHeaderName, challengeLog["auth_challenge_header"])
+	require.Equal(t, respHeaderName, challengeLog["auth_response_header"])
+	require.Equal(t, "novofon", challengeLog["realm"])
+	require.Equal(t, "MD5", challengeLog["algorithm"])
+	require.Equal(t, []string{"auth"}, challengeLog["qop"])
+	require.Equal(t, true, challengeLog["opaque_present"])
+	require.Equal(t, len(rawNonce), challengeLog["nonce_len"])
+	require.Equal(t, shortSHA256Hex(rawNonce), challengeLog["nonce_hash"])
+	require.Equal(t, "0101536", responseLog["username"])
+	require.Equal(t, cred.URI, responseLog["digest_uri"])
+	require.Equal(t, req.Recipient.String(), responseLog["request_uri"])
+	require.Equal(t, true, responseLog["has_proxy_authorization"])
+
+	rendered := fmt.Sprint(allFields)
+	require.NotContains(t, rendered, rawNonce)
+	require.NotContains(t, rendered, rawResponse)
+	require.NotContains(t, rendered, rawPassword)
+	require.NotContains(t, rendered, rawCnonce)
+	require.NotContains(t, rendered, "opaque-value")
 }
 
 func logFieldsMap(fields []interface{}) map[interface{}]interface{} {

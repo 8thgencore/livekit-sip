@@ -16,6 +16,8 @@ package sip
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"net"
@@ -1099,20 +1101,23 @@ authLoop:
 		if err != nil {
 			return nil, fmt.Errorf("invalid challenge %q: %w", challengeStr, err)
 		}
+		c.log.Infow("SIP INVITE auth challenge parsed", inviteAuthChallengeLogFields(resp.StatusCode, authHeaderName, authHeaderRespName, challenge)...)
 		toHeader := resp.To()
 		if toHeader == nil {
 			return nil, errors.New("no 'To' header on Response")
 		}
 
+		digestURI := toHeader.Address.String()
 		cred, err := digest.Digest(challenge, digest.Options{
 			Method:   req.Method.String(),
-			URI:      toHeader.Address.String(),
+			URI:      digestURI,
 			Username: user,
 			Password: pass,
 		})
 		if err != nil {
 			return nil, err
 		}
+		c.log.Infow("SIP INVITE auth response prepared", inviteAuthResponseLogFields(authHeaderRespName, req, cred, digestURI)...)
 		authHeader = cred.String()
 		// Try again with a computed digest
 	}
@@ -1330,6 +1335,57 @@ func inviteRequestLogFields(req *sip.Request) []interface{} {
 		fields = append(fields, "reason_headers", reasons)
 	}
 	return fields
+}
+
+func inviteAuthChallengeLogFields(status sip.StatusCode, authHeaderName, authHeaderRespName string, challenge *digest.Challenge) []interface{} {
+	fields := []interface{}{
+		"status", status,
+		"auth_challenge_header", authHeaderName,
+		"auth_response_header", authHeaderRespName,
+	}
+	if challenge == nil {
+		return fields
+	}
+	fields = append(fields,
+		"realm", challenge.Realm,
+		"algorithm", challenge.Algorithm,
+		"qop", challenge.QOP,
+		"stale", challenge.Stale,
+		"domain", challenge.Domain,
+		"nonce_hash", shortSHA256Hex(challenge.Nonce),
+		"nonce_len", len(challenge.Nonce),
+		"opaque_present", challenge.Opaque != "",
+	)
+	return fields
+}
+
+func inviteAuthResponseLogFields(authHeaderRespName string, req *sip.Request, cred *digest.Credentials, digestURI string) []interface{} {
+	fields := []interface{}{
+		"auth_response_header", authHeaderRespName,
+		"digest_uri", digestURI,
+		"has_proxy_authorization", authHeaderRespName == "Proxy-Authorization",
+	}
+	if req != nil {
+		fields = append(fields, "request_uri", req.Recipient.String())
+	}
+	if cred == nil {
+		return fields
+	}
+	fields = append(fields,
+		"username", cred.Username,
+		"algorithm", cred.Algorithm,
+		"qop", cred.QOP,
+		"nc", cred.Nc,
+	)
+	return fields
+}
+
+func shortSHA256Hex(value string) string {
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func sanitizedHeaderValues(headers []sip.Header) map[string][]string {
