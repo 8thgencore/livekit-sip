@@ -281,6 +281,41 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	return true
 }
 
+func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) {
+	if s == nil || s.cli == nil {
+		return
+	}
+	if auth.Username == "" || auth.Password == "" || auth.RegisterAddr == "" {
+		return
+	}
+	regConf := sipOutboundConfig{
+		address:      auth.RegisterAddr,
+		transport:    auth.RegisterTr,
+		user:         auth.Username,
+		pass:         auth.Password,
+		registerMode: outboundRegisterModeAuto,
+	}
+	if regConf.transport == livekit.SIPTransport_SIP_TRANSPORT_AUTO {
+		regConf.transport = livekit.SIPTransport_SIP_TRANSPORT_UDP
+	}
+	conf, err := s.cli.ensureRegistered(ctx, regConf)
+	if err != nil {
+		log.Warnw("SIP inbound REGISTER attempt failed, continuing without registration", err,
+			"registrar", auth.RegisterAddr,
+			"transport", TransportFrom(regConf.transport),
+			"authUser", auth.Username,
+		)
+		return
+	}
+	if conf != nil {
+		log.Infow("SIP inbound REGISTER ensured",
+			"registrar", conf.Registrar.GetDest(),
+			"transport", conf.Transport,
+			"authUser", conf.AuthUsername,
+		)
+	}
+}
+
 func (s *Server) onInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
 	// Error processed in defer
 	_ = s.processInvite(req, tx)
@@ -451,6 +486,7 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 		cc.RespondAndDrop(sip.StatusNotFound, "No trunk found")
 		return psrpc.NewErrorf(psrpc.NotFound, "no trunk found for call")
 	case AuthPassword:
+		s.ensureInboundRegistered(ctx, log, r)
 		if s.conf.HideInboundPort {
 			// We will send password request anyway, so might as well signal that the progress is made.
 			cc.Processing()
