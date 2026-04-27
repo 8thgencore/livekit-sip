@@ -617,6 +617,12 @@ func (p *MediaPort) Config() *MediaConf {
 	return p.conf
 }
 
+// InputSampleRate returns the expected sample rate for incoming audio from SIP.
+// Must be called after SetConfig, which sets the audioIn sample rate.
+func (p *MediaPort) InputSampleRate() int {
+	return p.audioIn.SampleRate()
+}
+
 // WriteAudioTo sets audio writer that will receive decoded PCM from incoming RTP packets.
 func (p *MediaPort) WriteAudioTo(w msdk.PCM16Writer) {
 	if processor := p.conf.Processor; processor != nil {
@@ -642,7 +648,7 @@ func (p *MediaPort) NewOffer(encrypted sdp.Encryption) (*sdp.Offer, error) {
 func (p *MediaPort) SetAnswer(offer *sdp.Offer, answerData []byte, enc sdp.Encryption) (*MediaConf, []byte, error) {
 	answer, err := sdp.ParseAnswer(answerData)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SDPError{Err: err}
 	}
 	mc, localSDP, err := answer.ApplyWithLocal(offer, enc)
 	if err != nil {
@@ -659,11 +665,11 @@ func (p *MediaPort) SetAnswer(offer *sdp.Offer, answerData []byte, enc sdp.Encry
 func (p *MediaPort) SetOffer(offerData []byte, enc sdp.Encryption) (*sdp.Answer, *MediaConf, error) {
 	offer, err := sdp.ParseOffer(offerData)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SDPError{Err: err}
 	}
 	answer, mc, err := offer.Answer(p.externalIP, p.Port(), enc)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SDPError{Err: err}
 	}
 	return answer, &MediaConf{MediaConfig: *mc}, nil
 }
