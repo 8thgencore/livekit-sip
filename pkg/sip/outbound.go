@@ -461,13 +461,16 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.dialSIP(ctx, tid); err != nil {
-		c.log.Infow("SIP call failed", "error", err)
+		c.log.Warnw("SIP call failed", err)
 
 		reportErr := err
 		status, term, reason := callDropped, stats.ServerError("invite-failed"), livekit.DisconnectReason_UNKNOWN_REASON
 		var e *livekit.SIPStatus
 		if errors.As(err, &e) {
 			switch int(e.Code) {
+			case int(sip.StatusRequestTerminated):
+				status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
+				reportErr = nil
 			case int(sip.StatusTemporarilyUnavailable):
 				status, term, reason = callUnavailable, stats.ClientError("unavailable"), livekit.DisconnectReason_USER_UNAVAILABLE
 				reportErr = nil
@@ -595,7 +598,10 @@ func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan stru
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "service shutting down")
 		case <-tx.Done():
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "transaction failed to complete (%d intermediate responses)", cnt)
-		case res := <-tx.Responses():
+		case res, ok := <-tx.Responses():
+			if !ok || res == nil {
+				return nil, psrpc.NewErrorf(psrpc.Canceled, "transaction response channel closed (%d intermediate responses)", cnt)
+			}
 			status := res.StatusCode
 			if setState != nil {
 				setState(res.StatusCode, res.Headers())
@@ -1118,6 +1124,7 @@ authLoop:
 			})
 		case sip.StatusBadRequest,
 			sip.StatusNotFound,
+			sip.StatusRequestTerminated,
 			sip.StatusTemporarilyUnavailable,
 			sip.StatusServiceUnavailable,
 			sip.StatusNotAcceptableHere,

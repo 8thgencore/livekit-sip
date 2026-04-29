@@ -344,6 +344,49 @@ func TestRetryInviteAfterBusyReturnsSecondBusy(t *testing.T) {
 	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE, sipErr.Code)
 }
 
+func TestOutboundInviteRequestTerminatedIsClientError(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	sessionEnd := make(chan string, 1)
+	client.SetHandler(&TestHandler{
+		OnSessionEndFunc: func(ctx context.Context, callIdentifier *CallIdentifier, callInfo *livekit.SIPCallInfo, reason string) {
+			sessionEnd <- reason
+		},
+	})
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "pbx.uiscom.ru:5060"
+	req.Hostname = ""
+	req.Username = "0526470"
+	req.Password = "test-password"
+	req.Number = "0526470"
+	req.CallTo = "+77057756019"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTerminated, "Request Terminated", nil)))
+
+	err := <-done
+	require.Error(t, err)
+	var sipErr *livekit.SIPStatus
+	require.ErrorAs(t, err, &sipErr)
+	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_REQUEST_TERMINATED, sipErr.Code)
+
+	select {
+	case reason := <-sessionEnd:
+		require.Equal(t, "request-terminated", reason)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnSessionEnd")
+	}
+}
+
 func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
