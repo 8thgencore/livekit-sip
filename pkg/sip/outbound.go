@@ -1165,12 +1165,7 @@ authLoop:
 			return nil, fmt.Errorf("invalid challenge %q: %w", challengeStr, err)
 		}
 		c.log.Infow("SIP INVITE auth challenge parsed", inviteAuthChallengeLogFields(resp.StatusCode, authHeaderName, authHeaderRespName, challenge)...)
-		toHeader := resp.To()
-		if toHeader == nil {
-			return nil, errors.New("no 'To' header on Response")
-		}
-
-		digestURI := toHeader.Address.String()
+		digestURI := req.Recipient.String()
 		cred, err := digest.Digest(challenge, digest.Options{
 			Method:   req.Method.String(),
 			URI:      digestURI,

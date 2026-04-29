@@ -272,6 +272,54 @@ func TestRetryInviteAfterBusyUsesFreshCallIDAndHandlesAuth(t *testing.T) {
 	require.Equal(t, answer, res.body)
 }
 
+func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	toURI := CreateURIFromUserAndAddress("+79998887722", "login.test.com:5060", TransportUDP)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "123456", "test-password", nil, []byte("v=0\r\n"), nil)
+		result <- err
+	}()
+
+	firstInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, firstInvite.req.Method)
+	require.Equal(t, "sip:+79998887722@login.test.com:5060;transport=udp", firstInvite.req.Recipient.String())
+
+	challenge := digest.Challenge{
+		Realm:     "login.test.com",
+		Nonce:     "12345678901234567890123456789012",
+		Algorithm: "MD5",
+		QOP:       []string{"auth"},
+	}
+	resp := sip.NewResponseFromRequest(firstInvite.req, sip.StatusUnauthorized, "Unauthorized", nil)
+	resp.RemoveHeader("To")
+	resp.AppendHeader(&sip.ToHeader{Address: sip.Uri{
+		User: "+79998887722",
+		Host: "login.test.com",
+		UriParams: sip.HeaderParams{{
+			K: "transport",
+			V: "udp",
+		}},
+	}})
+	resp.AppendHeader(sip.NewHeader("WWW-Authenticate", challenge.String()))
+	require.NoError(t, firstInvite.transaction.SendResponse(resp))
+
+	authInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, authInvite.req.Method)
+	authHeader := authInvite.req.GetHeader("Authorization")
+	require.NotNil(t, authHeader)
+	cred, err := digest.ParseCredentials(authHeader.Value())
+	require.NoError(t, err)
+	require.Equal(t, firstInvite.req.Recipient.String(), cred.URI)
+	require.Equal(t, "sip:+79998887722@login.test.com:5060;transport=udp", cred.URI)
+
+	require.NoError(t, authInvite.transaction.SendResponse(sip.NewResponseFromRequest(authInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n"))))
+	require.NoError(t, <-result)
+}
+
 func TestRetryInviteAfterBusyReturnsSecondBusy(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
