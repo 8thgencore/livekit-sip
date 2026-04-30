@@ -281,12 +281,12 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	return true
 }
 
-func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) {
+func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) bool {
 	if s == nil || s.cli == nil {
-		return
+		return false
 	}
 	if auth.Username == "" || auth.Password == "" || auth.RegisterAddr == "" {
-		return
+		return false
 	}
 	regConf := sipOutboundConfig{
 		address:      auth.RegisterAddr,
@@ -305,7 +305,7 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 			"transport", TransportFrom(regConf.transport),
 			"authUser", auth.Username,
 		)
-		return
+		return false
 	}
 	if conf != nil {
 		log.Infow("SIP inbound REGISTER ensured",
@@ -313,7 +313,9 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 			"transport", conf.Transport,
 			"authUser", conf.AuthUsername,
 		)
+		return true
 	}
+	return false
 }
 
 func (s *Server) onInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
@@ -486,13 +488,20 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 		cc.RespondAndDrop(sip.StatusNotFound, "No trunk found")
 		return psrpc.NewErrorf(psrpc.NotFound, "no trunk found for call")
 	case AuthPassword:
-		s.ensureInboundRegistered(ctx, log, r)
+		registered := s.ensureInboundRegistered(ctx, log, r)
 		if s.conf.HideInboundPort {
 			// We will send password request anyway, so might as well signal that the progress is made.
 			cc.Processing()
 			tryingTime = time.Now()
 		}
 		s.getCallInfo(cc.ID()).countInvite(log, req)
+		if registered {
+			log.Infow("SIP inbound REGISTER verified, accepting INVITE without digest challenge",
+				"registrar", r.RegisterAddr,
+				"authUser", r.Username,
+			)
+			break
+		}
 		if !s.handleInviteAuth(tid, log, req, tx, from.User, r.Username, r.Password) {
 			// Store (call-ID + from tag) to (to tag) mapping
 			s.cmu.Lock()
@@ -762,7 +771,6 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 	if disp.DispatchRuleID != "" {
 		c.appendLogValues("sipRule", disp.DispatchRuleID)
 	}
-
 	c.state.Update(ctx, func(info *livekit.SIPCallInfo) {
 		info.TrunkId = disp.TrunkID
 		info.DispatchRuleId = disp.DispatchRuleID

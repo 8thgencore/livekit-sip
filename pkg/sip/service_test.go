@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -682,6 +683,123 @@ func TestDigestAuthStandardFlow(t *testing.T) {
 	default:
 		t.Logf("Second request got status: %d", res2.StatusCode)
 	}
+}
+
+func TestRegisteredInboundTrunkSkipsInviteDigestAuth(t *testing.T) {
+	const (
+		fromUser = "caller@example.com"
+		toUser   = "registered@example.com"
+		username = "register-user"
+		password = "register-pass"
+		callID   = "registered-inbound@test.com"
+	)
+
+	log := logger.NewTestLoggerLevel(t, 1)
+
+	registrar := newUATest(t, log, netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 9))
+	registerSink := registrar.RegisterSink("", "REGISTER")
+	registerSeen := make(chan struct{}, 1)
+	go func() {
+		select {
+		case msg := <-registerSink:
+			registerSeen <- struct{}{}
+			res := sip.NewResponseFromRequest(msg.req, sip.StatusOK, "OK", nil)
+			_ = msg.tx.Respond(res)
+		case <-time.After(5 * time.Second):
+		}
+	}()
+
+	var dispatchCalls int
+	var dispatchMu sync.Mutex
+	h := &TestHandler{
+		GetAuthCredentialsFunc: func(ctx context.Context, call *rpc.SIPCall) (AuthInfo, error) {
+			return AuthInfo{
+				Result:       AuthPassword,
+				Username:     username,
+				Password:     password,
+				RegisterAddr: registrar.localAddr.String(),
+				RegisterTr:   livekit.SIPTransport_SIP_TRANSPORT_UDP,
+			}, nil
+		},
+		DispatchCallFunc: func(ctx context.Context, info *CallInfo) CallDispatch {
+			dispatchMu.Lock()
+			dispatchCalls++
+			dispatchMu.Unlock()
+			return CallDispatch{Result: DispatchNoRuleReject}
+		},
+		OnSessionEndFunc: func(ctx context.Context, callIdentifier *CallIdentifier, callInfo *livekit.SIPCallInfo, reason string) {
+		},
+	}
+
+	sipPort := rand.Intn(testPortSIPMax-testPortSIPMin) + testPortSIPMin
+	localIP, err := config.GetLocalIP()
+	require.NoError(t, err)
+	sipServerAddress := fmt.Sprintf("%s:%d", localIP, sipPort)
+
+	mon, err := stats.NewMonitor(&config.Config{MaxCpuUtilization: 0.9})
+	require.NoError(t, err)
+
+	s, err := NewService("", &config.Config{
+		HideInboundPort: false,
+		SIPPort:         sipPort,
+		SIPPortListen:   sipPort,
+		RTPPort:         rtcconfig.PortRange{Start: testPortRTPMin, End: testPortRTPMax},
+	}, mon, log, func(projectID string) rpc.IOInfoClient { return nil })
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	s.SetHandler(h)
+	require.NoError(t, s.Start())
+	t.Cleanup(s.Stop)
+
+	sipUserAgent, err := sipgo.NewUA(
+		sipgo.WithUserAgent(fromUser),
+		sipgo.WithUserAgentLogger(slog.New(logger.ToSlogHandler(s.log))),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { sipUserAgent.Close() })
+
+	sipClient, err := sipgo.NewClient(sipUserAgent)
+	require.NoError(t, err)
+	t.Cleanup(func() { sipClient.Close() })
+
+	offer, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	require.NoError(t, err)
+	offerData, err := offer.SDP.Marshal()
+	require.NoError(t, err)
+
+	inviteRecipient := sip.Uri{User: toUser, Host: sipServerAddress}
+	inviteRequest := sip.NewRequest(sip.INVITE, inviteRecipient)
+	inviteRequest.SetDestination(sipServerAddress)
+	inviteRequest.SetBody(offerData)
+	inviteRequest.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	inviteRequest.AppendHeader(sip.NewHeader("Call-ID", callID))
+	inviteRequest.AppendHeader(&sip.FromHeader{
+		DisplayName: fromUser,
+		Address:     sip.Uri{User: fromUser, Host: sipServerAddress},
+		Params:      sip.HeaderParams{{"tag", "registered-inbound-from-tag"}},
+	})
+
+	tx, err := sipClient.TransactionRequest(inviteRequest)
+	require.NoError(t, err)
+	t.Cleanup(tx.Terminate)
+
+	res := getResponseOrFail(t, tx)
+	require.Equal(t, sip.StatusCode(100), res.StatusCode)
+	res = getFinalResponseOrFail(t, tx, inviteRequest)
+	require.NotEqual(t, sip.StatusCode(407), res.StatusCode)
+	require.Nil(t, res.GetHeader("Proxy-Authenticate"))
+	require.Equal(t, sip.StatusNotFound, res.StatusCode)
+
+	select {
+	case <-registerSeen:
+	case <-time.After(time.Second):
+		t.Fatal("expected inbound REGISTER to be ensured")
+	}
+
+	dispatchMu.Lock()
+	require.Equal(t, 1, dispatchCalls)
+	dispatchMu.Unlock()
 }
 
 // When a cancel request is sent, we expect two responses, 200 (for CANCEL), and 487 (for INVITE).
