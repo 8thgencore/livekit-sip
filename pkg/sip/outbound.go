@@ -1506,7 +1506,7 @@ func (c *sipOutbound) sendBye(ctx context.Context) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.sendBye")
 	defer span.End()
 	r := sip.NewByeRequest(c.invite, c.inviteOk, nil)
-	r.AppendHeader(sip.NewHeader("User-Agent", "LiveKit"))
+	r.AppendHeader(sip.NewHeader("User-Agent", "AI-MOP"))
 	if c.getHeaders != nil {
 		for k, v := range c.getHeaders(nil) {
 			r.AppendHeader(sip.NewHeader(k, v))
@@ -1530,7 +1530,7 @@ func (c *sipOutbound) sendCancel(ctx context.Context) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.sendCancel")
 	defer span.End()
 	r := sip.NewCancelRequest(c.invite)
-	r.AppendHeader(sip.NewHeader("User-Agent", "LiveKit"))
+	r.AppendHeader(sip.NewHeader("User-Agent", "AI-MOP"))
 	if c.getHeaders != nil {
 		for k, v := range c.getHeaders(nil) {
 			r.AppendHeader(sip.NewHeader(k, v))

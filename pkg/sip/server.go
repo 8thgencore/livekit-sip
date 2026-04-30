@@ -44,7 +44,7 @@ import (
 )
 
 const (
-	UserAgent   = "LiveKit"
+	UserAgent   = "AI-MOP"
 	digestLimit = 500
 )
 
