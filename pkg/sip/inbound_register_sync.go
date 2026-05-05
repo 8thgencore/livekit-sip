@@ -3,7 +3,7 @@ package sip
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,10 +47,9 @@ func (s *Service) startInboundRegisterSync() {
 	s.mu.Unlock()
 
 	sipClient := lksdk.NewSIPClient(s.conf.WsUrl, s.conf.ApiKey, s.conf.ApiSecret)
-	seen := make(map[string]string)
 
 	go func() {
-		s.syncInboundTrunksForRegister(ctx, sipClient, seen)
+		s.syncInboundTrunksForRegister(ctx, sipClient)
 		ticker := time.NewTicker(inboundRegisterSyncInterval)
 		defer ticker.Stop()
 		for {
@@ -58,13 +57,13 @@ func (s *Service) startInboundRegisterSync() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.syncInboundTrunksForRegister(ctx, sipClient, seen)
+				s.syncInboundTrunksForRegister(ctx, sipClient)
 			}
 		}
 	}()
 }
 
-func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *lksdk.SIPClient, seen map[string]string) {
+func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *lksdk.SIPClient) {
 	resp, err := sipClient.ListSIPInboundTrunk(ctx, &livekit.ListSIPInboundTrunkRequest{})
 	if err != nil {
 		s.log.Warnw("failed to list inbound trunks for REGISTER sync", err)
@@ -74,12 +73,6 @@ func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *l
 		if trunk == nil {
 			continue
 		}
-		key := trunk.GetSipTrunkId()
-		fingerprint := fmt.Sprint(trunk.GetUpdatedAt()) + "|" + trunk.GetMetadata() + "|" + trunk.GetAuthUsername()
-		if prev, ok := seen[key]; ok && prev == fingerprint {
-			continue
-		}
-		seen[key] = fingerprint
 		s.registerInboundTrunkFromMetadata(ctx, trunk)
 	}
 }
@@ -111,7 +104,7 @@ func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *l
 
 	address := host
 	if meta.SIPEndpoint.Port > 0 {
-		address = fmt.Sprintf("%s:%d", host, meta.SIPEndpoint.Port)
+		address = host + ":" + strconv.Itoa(meta.SIPEndpoint.Port)
 	}
 	auth := AuthInfo{
 		Result:       AuthPassword,
