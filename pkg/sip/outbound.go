@@ -86,6 +86,16 @@ var outboundRegistrationRequiredHosts = map[string]struct{}{
 	"pbx.uiscom.ru": {},
 }
 
+type providerAuthConfigError struct {
+	address  string
+	fromUser string
+	status   sip.StatusCode
+}
+
+func (e providerAuthConfigError) Error() string {
+	return fmt.Sprintf("SIP IP trunk rejected INVITE auth with status %d for address %q and from user %q; verify public IP/port binding and outbound caller ID", e.status, e.address, e.fromUser)
+}
+
 type outboundCall struct {
 	c             *Client
 	tid           traceid.ID
@@ -122,6 +132,14 @@ func requiresRegistrationForAddress(address string) bool {
 	host := normalizeSIPHost(address)
 	_, ok := outboundRegistrationRequiredHosts[host]
 	return ok
+}
+
+func usesRegisterSkippedIPTrunk(sipConf sipOutboundConfig) bool {
+	if !shouldSkipRegistrationForAddress(sipConf.address) {
+		return false
+	}
+	return sipConf.registerMode == outboundRegisterModeDisabled ||
+		sipConf.registerMode == outboundRegisterModeAuto
 }
 
 func normalizeSIPHost(address string) string {
@@ -226,6 +244,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		}
 		return AttrsToHeaders(r.LocalParticipant.Attributes(), c.sipConf.attrsToHeaders, headers)
 	})
+	call.cc.registerSkippedIPTrunk = usesRegisterSkippedIPTrunk(sipConf)
 	if sipConf.featureFlags[outboundRouteHeadersFeatureFlag] == "true" {
 		call.cc.routeHeaders = conf.OutboundRouteHeaders
 	}
@@ -505,6 +524,9 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 			} else {
 				term = stats.ClientError("sdp-error")
 			}
+		} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
+			status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
+			reportErr = nil
 		}
 		if reportErr == nil {
 			c.log.Infow("SIP call ended with expected SIP status", "error", err)
@@ -976,12 +998,13 @@ func (c *Client) newOutbound(log logger.Logger, id LocalTag, from, contact URI, 
 }
 
 type sipOutbound struct {
-	log          logger.Logger
-	c            *Client
-	id           LocalTag
-	from         *sip.FromHeader
-	contact      *sip.ContactHeader
-	routeHeaders []string
+	log                    logger.Logger
+	c                      *Client
+	id                     LocalTag
+	from                   *sip.FromHeader
+	contact                *sip.ContactHeader
+	routeHeaders           []string
+	registerSkippedIPTrunk bool
 
 	mu         sync.RWMutex
 	tag        RemoteTag
@@ -1119,6 +1142,9 @@ func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *Resolved
 		req                *sip.Request
 		resp               *sip.Response
 		err                error
+		lastAuthStatus     sip.StatusCode
+		lastAuthAddress    string
+		lastAuthFromUser   string
 	)
 	if keys := maps.Keys(headers); len(keys) != 0 {
 		sort.Strings(keys)
@@ -1130,6 +1156,13 @@ func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *Resolved
 authLoop:
 	for try := 0; ; try++ {
 		if try >= inviteAuthMaxAttempts {
+			if c.registerSkippedIPTrunk && lastAuthStatus != 0 {
+				return nil, psrpc.NewError(psrpc.FailedPrecondition, providerAuthConfigError{
+					address:  lastAuthAddress,
+					fromUser: lastAuthFromUser,
+					status:   lastAuthStatus,
+				})
+			}
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
 		}
 		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState)
@@ -1182,6 +1215,9 @@ authLoop:
 			authHeaderRespName = "Proxy-Authorization"
 		}
 		c.log.Infow("auth requested", "status", resp.StatusCode, "body", string(resp.Body()))
+		lastAuthStatus = resp.StatusCode
+		lastAuthAddress = req.Recipient.Host
+		lastAuthFromUser = c.from.Address.User
 		// auth required
 		if user == "" || pass == "" {
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, errors.New("sip server required auth, but no username or password was provided"))

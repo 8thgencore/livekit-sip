@@ -513,7 +513,7 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
+func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
@@ -521,7 +521,7 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 	req.Hostname = ""
 	req.Username = "5550104"
 	req.Password = "test-password"
-	req.Number = "5550104"
+	req.Number = "+74951234567"
 	req.WaitUntilAnswered = true
 	setOutboundRegisterMode(req, outboundRegisterModeAuto)
 
@@ -535,6 +535,53 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
 	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 	require.Error(t, <-done)
+}
+
+func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRetries(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.novofon.ru:5060"
+	req.Hostname = ""
+	req.Username = "0101536"
+	req.Password = "test-password"
+	req.Number = "0101536"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.Nil(t, inviteTx.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, inviteTx)
+
+	authInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, authInviteTx.req.Method)
+	require.NotNil(t, authInviteTx.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, authInviteTx)
+
+	finalAuthInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, finalAuthInviteTx.req.Method)
+	require.NotNil(t, finalAuthInviteTx.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, finalAuthInviteTx)
+
+	err := <-done
+	require.Error(t, err)
+	var providerErr providerAuthConfigError
+	require.ErrorAs(t, err, &providerErr)
+	require.Equal(t, sip.StatusProxyAuthRequired, providerErr.status)
+
+	select {
+	case retryTx := <-sipClient.transactions:
+		t.Cleanup(func() { retryTx.transaction.Terminate() })
+		t.Fatalf("unexpected retry transaction: %s", retryTx.req.Method)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestOutboundInviteRequiresRegisterWhenConfigured(t *testing.T) {
