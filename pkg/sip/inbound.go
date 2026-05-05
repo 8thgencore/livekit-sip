@@ -1010,7 +1010,7 @@ func (c *inboundCall) waitForCallEnd(ctx context.Context, ackReceived <-chan str
 			c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
 				info.DisconnectReason = livekit.DisconnectReason_CLIENT_INITIATED
 			})
-			c.close(ctx, callDropped, stats.Success("removed"))
+			c.close(ctx, callDropped, terminationFromRoomDisconnect(c.lkRoom.ClosedReason()))
 			return nil
 		case <-c.media.Timeout():
 			return c.mediaTimeout(ctx)
@@ -1349,6 +1349,13 @@ func (c *inboundCall) Bye(reason ReasonHeader) {
 func (c *inboundCall) Close() error {
 	c.cancel()
 	return nil
+}
+
+// Shutdown force-closes the call as part of service shutdown, emitting a
+// server_error termination so the call is counted in the SLI denominator.
+// close() is idempotent via c.done, so concurrent paths cannot double-emit.
+func (c *inboundCall) Shutdown(ctx context.Context) {
+	c.close(ctx, callDropped, stats.ServerError("shutdown"))
 }
 
 func (c *inboundCall) closeMedia() {
