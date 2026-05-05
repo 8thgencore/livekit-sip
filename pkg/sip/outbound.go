@@ -82,6 +82,10 @@ var outboundRegisterSkipHosts = map[string]struct{}{
 	"sip.novofon.ru": {},
 }
 
+var outboundRegistrationRequiredHosts = map[string]struct{}{
+	"pbx.uiscom.ru": {},
+}
+
 type outboundCall struct {
 	c             *Client
 	tid           traceid.ID
@@ -109,13 +113,23 @@ type outboundCall struct {
 }
 
 func shouldSkipRegistrationForAddress(address string) bool {
+	host := normalizeSIPHost(address)
+	_, ok := outboundRegisterSkipHosts[host]
+	return ok
+}
+
+func requiresRegistrationForAddress(address string) bool {
+	host := normalizeSIPHost(address)
+	_, ok := outboundRegistrationRequiredHosts[host]
+	return ok
+}
+
+func normalizeSIPHost(address string) string {
 	host := address
 	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
 		host = parsedHost
 	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	_, ok := outboundRegisterSkipHosts[host]
-	return ok
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Config, log logger.Logger, id LocalTag, room RoomConfig, sipConf sipOutboundConfig, state *CallState, projectID string) (*outboundCall, error) {
@@ -462,8 +476,6 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.dialSIP(ctx, tid); err != nil {
-		c.log.Warnw("SIP call failed", err)
-
 		reportErr := err
 		status, term, reason := callDropped, stats.ServerError("invite-failed"), livekit.DisconnectReason_UNKNOWN_REASON
 		var e *livekit.SIPStatus
@@ -474,6 +486,9 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 				reportErr = nil
 			case int(sip.StatusTemporarilyUnavailable):
 				status, term, reason = callUnavailable, stats.ClientError("unavailable"), livekit.DisconnectReason_USER_UNAVAILABLE
+				reportErr = nil
+			case int(sip.StatusRequestTimeout):
+				status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
 				reportErr = nil
 			case int(sip.StatusBusyHere):
 				status, term, reason = callRejected, stats.ClientError("busy"), livekit.DisconnectReason_USER_REJECTED
@@ -490,6 +505,11 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 			} else {
 				term = stats.ClientError("sdp-error")
 			}
+		}
+		if reportErr == nil {
+			c.log.Infow("SIP call ended with expected SIP status", "error", err)
+		} else {
+			c.log.Warnw("SIP call failed", err)
 		}
 		c.close(ctx, reportErr, status, term, reason)
 		return err
@@ -801,6 +821,9 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 
 func (c *outboundCall) shouldRetryInviteWithoutRegistration(err error) bool {
 	if c == nil || c.regProfile == nil || c.sipConf.registerMode != outboundRegisterModeAuto {
+		return false
+	}
+	if requiresRegistrationForAddress(c.sipConf.address) {
 		return false
 	}
 	var sipErr *livekit.SIPStatus

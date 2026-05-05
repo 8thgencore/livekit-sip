@@ -85,6 +85,7 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	req.Number = mockRegisteredUser
 	req.CallTo = mockCallToUser
 	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeRequired)
 
 	done := make(chan error, 1)
 	go func() {
@@ -110,7 +111,7 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 
 	require.Error(t, <-done)
 }
@@ -155,6 +156,55 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	require.NotZero(t, directInviteTx.req.From().Address.Port)
 	require.Empty(t, directInviteTx.req.Contact().Address.User)
 	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteAutoKeepsRegistrationForUISBusyHere(t *testing.T) {
+	const (
+		mockRegisteredUser = "0526470"
+		mockCallToUser     = "+77057756019"
+		mockSIPHost        = "pbx.uiscom.ru"
+	)
+
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = mockSIPHost + ":5060"
+	req.Hostname = ""
+	req.Username = mockRegisteredUser
+	req.Password = "test-password"
+	req.Number = mockRegisteredUser
+	req.CallTo = mockCallToUser
+	req.WaitUntilAnswered = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+	registeredInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
+	require.Equal(t, mockSIPHost, registeredInviteTx.req.From().Address.Host)
+	require.Equal(t, mockRegisteredUser, registeredInviteTx.req.Contact().Address.User)
+	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+
+	select {
+	case tx := <-sipClient.transactions:
+		t.Fatalf("unexpected immediate retry without REGISTER profile: %s contact=%s", tx.req.Method, tx.req.Contact().Address.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	retryInviteTx := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
+	require.Equal(t, sip.INVITE, retryInviteTx.req.Method)
+	require.Equal(t, mockSIPHost, retryInviteTx.req.From().Address.Host)
+	require.Equal(t, mockRegisteredUser, retryInviteTx.req.Contact().Address.User)
+	require.NoError(t, retryInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(retryInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	require.Error(t, <-done)
 }
@@ -387,6 +437,49 @@ func TestOutboundInviteRequestTerminatedIsClientError(t *testing.T) {
 	}
 }
 
+func TestOutboundInviteRequestTimeoutIsClientError(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	sessionEnd := make(chan string, 1)
+	client.SetHandler(&TestHandler{
+		OnSessionEndFunc: func(ctx context.Context, callIdentifier *CallIdentifier, callInfo *livekit.SIPCallInfo, reason string) {
+			sessionEnd <- reason
+		},
+	})
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "pbx.uiscom.ru:5060"
+	req.Hostname = ""
+	req.Username = "0526470"
+	req.Password = "test-password"
+	req.Number = "0526470"
+	req.CallTo = "+77057756019"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTimeout, "Request Timeout", nil)))
+
+	err := <-done
+	require.Error(t, err)
+	var sipErr *livekit.SIPStatus
+	require.ErrorAs(t, err, &sipErr)
+	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_REQUEST_TIMEOUT, sipErr.Code)
+
+	select {
+	case reason := <-sessionEnd:
+		require.Equal(t, "request-timeout", reason)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnSessionEnd")
+	}
+}
+
 func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
@@ -415,7 +508,7 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.True(t, hasTransport)
 	require.NotNil(t, inviteTx.req.Contact())
 	require.Empty(t, inviteTx.req.Contact().Address.User)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 
 	require.Error(t, <-done)
 }
@@ -440,7 +533,7 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 	require.Error(t, <-done)
 }
 
@@ -487,7 +580,7 @@ func TestOutboundInviteWithoutRegistrationKeepsHostOnlyContact(t *testing.T) {
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 
 	require.Error(t, <-done)
 }
