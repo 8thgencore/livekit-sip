@@ -74,7 +74,6 @@ type sipOutboundConfig struct {
 
 const (
 	inviteRetryAfterFreshRegisterDelay = 2 * time.Second
-	inviteRetryAfterBusyDelay          = 2 * time.Second
 )
 
 var outboundRegisterSkipHosts = map[string]struct{}{
@@ -762,14 +761,8 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		c.setExtraAttrs(nil, 0, nil, hdrs)
 	}
 	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
-	inviteRetried := false
 	if c.shouldRetryInviteWithoutRegistration(err) {
-		inviteRetried = true
 		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState)
-	}
-	if !inviteRetried && c.shouldRetryInviteAfterBusy(err) {
-		inviteRetried = true
-		sdpResp, err = c.retryInviteAfterBusy(ctx, toUri, sdpOfferData, setState)
 	}
 	// Update SIPCallInfo with the SIP Call-ID after Invite
 	if sipCallID := c.cc.SIPCallID(); sipCallID != "" {
@@ -859,55 +852,12 @@ func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri
 		"retry_reason", "registered_invite_busy_here",
 		"registerMode", c.sipConf.registerMode.String(),
 	)
-	c.cc.Close(ctx)
 	getHeaders := c.cc.getHeaders
-	nextCSeq := c.cc.nextCSeq
+	c.cc.Close(ctx)
 	c.cc = c.c.newOutbound(c.log, c.cc.ID(), c.directFrom, c.directContact, c.sipConf.displayName, getHeaders)
-	c.cc.nextCSeq = nextCSeq
 	c.regProfile = nil
 	c.mon.InviteReq()
-	return c.cc.Invite(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
-}
-
-func (c *outboundCall) shouldRetryInviteAfterBusy(err error) bool {
-	if c == nil || c.closing.IsBroken() {
-		return false
-	}
-	var sipErr *livekit.SIPStatus
-	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
-}
-
-func (c *outboundCall) retryInviteAfterBusy(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
-	previousSIPCallID := ""
-	if c.cc != nil {
-		previousSIPCallID = c.cc.SIPCallID()
-	}
-	c.log.Infow("retrying SIP INVITE after busy response",
-		"original_status", sip.StatusBusyHere,
-		"retry_attempt", 1,
-		"retry_delay_ms", inviteRetryAfterBusyDelay.Milliseconds(),
-		"previous_sip_call_id", previousSIPCallID,
-		"to", toUri.GetURI().String(),
-	)
-	timer := time.NewTimer(inviteRetryAfterBusyDelay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.closing.Watch():
-		return nil, errors.New("outbound call closing")
-	case <-c.c.closing.Watch():
-		return nil, errors.New("SIP client closed")
-	}
-	c.mon.InviteReq()
-	sdpResp, err := c.cc.InviteWithFreshCallID(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
-	if err != nil {
-		c.log.Infow("SIP INVITE busy retry failed", "error", err)
-		return nil, err
-	}
-	c.log.Infow("SIP INVITE busy retry succeeded", "sipCallID", c.cc.SIPCallID())
-	return sdpResp, nil
+	return c.cc.InviteWithFreshCallID(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
 }
 
 func (c *outboundCall) handleDTMF(ev dtmf.Event) {

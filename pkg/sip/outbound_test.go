@@ -146,65 +146,19 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 
 	registeredInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
+	registeredCallID := registeredInviteTx.req.CallID().Value()
 	require.Equal(t, mockSIPHost, registeredInviteTx.req.From().Address.Host)
 	require.Equal(t, mockRegisteredUser, registeredInviteTx.req.Contact().Address.User)
 	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	directInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, directInviteTx.req.Method)
+	require.NotEqual(t, registeredCallID, directInviteTx.req.CallID().Value())
+	require.Equal(t, uint32(1), directInviteTx.req.CSeq().SeqNo)
 	require.Equal(t, client.sconf.SignalingIP.String(), directInviteTx.req.From().Address.Host)
 	require.NotZero(t, directInviteTx.req.From().Address.Port)
 	require.Empty(t, directInviteTx.req.Contact().Address.User)
 	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
-
-	require.Error(t, <-done)
-}
-
-func TestOutboundInviteAutoKeepsRegistrationForUISBusyHere(t *testing.T) {
-	const (
-		mockRegisteredUser = "0526470"
-		mockCallToUser     = "+77057756019"
-		mockSIPHost        = "pbx.uiscom.ru"
-	)
-
-	client := NewOutboundTestClient(t, TestClientConfig{})
-	sipClient := getCreatedSIPClient(t)
-	req := MinimalCreateSIPParticipantRequest()
-	req.Address = mockSIPHost + ":5060"
-	req.Hostname = ""
-	req.Username = mockRegisteredUser
-	req.Password = "test-password"
-	req.Number = mockRegisteredUser
-	req.CallTo = mockCallToUser
-	req.WaitUntilAnswered = true
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := client.CreateSIPParticipant(context.Background(), req)
-		done <- err
-	}()
-
-	registerTx := waitTransaction(t, sipClient)
-	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
-
-	registeredInviteTx := waitTransaction(t, sipClient)
-	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
-	require.Equal(t, mockSIPHost, registeredInviteTx.req.From().Address.Host)
-	require.Equal(t, mockRegisteredUser, registeredInviteTx.req.Contact().Address.User)
-	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
-
-	select {
-	case tx := <-sipClient.transactions:
-		t.Fatalf("unexpected immediate retry without REGISTER profile: %s contact=%s", tx.req.Method, tx.req.Contact().Address.String())
-	case <-time.After(500 * time.Millisecond):
-	}
-
-	retryInviteTx := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
-	require.Equal(t, sip.INVITE, retryInviteTx.req.Method)
-	require.Equal(t, mockSIPHost, retryInviteTx.req.From().Address.Host)
-	require.Equal(t, mockRegisteredUser, retryInviteTx.req.Contact().Address.User)
-	require.NoError(t, retryInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(retryInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	require.Error(t, <-done)
 }
@@ -261,67 +215,6 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 	}
 }
 
-func TestRetryInviteAfterBusyUsesFreshCallIDAndHandlesAuth(t *testing.T) {
-	client := NewOutboundTestClient(t, TestClientConfig{})
-	sipClient := getCreatedSIPClient(t)
-	outbound := newTestOutboundCall(client)
-	toURI := CreateURIFromUserAndAddress("+79993441100", "sip.novofon.ru:5060", TransportUDP)
-
-	firstResult := make(chan error, 1)
-	go func() {
-		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "0101536", "test-password", nil, []byte("v=0\r\n"), nil)
-		firstResult <- err
-	}()
-
-	firstInvite := waitTransaction(t, sipClient)
-	require.Equal(t, sip.INVITE, firstInvite.req.Method)
-	firstCallID := firstInvite.req.CallID().Value()
-	require.Equal(t, uint32(1), firstInvite.req.CSeq().SeqNo)
-	require.Nil(t, firstInvite.req.GetHeader("Proxy-Authorization"))
-	sendProxyAuthRequired(t, firstInvite)
-
-	firstAuthInvite := waitTransaction(t, sipClient)
-	require.Equal(t, firstCallID, firstAuthInvite.req.CallID().Value())
-	require.Equal(t, uint32(2), firstAuthInvite.req.CSeq().SeqNo)
-	require.NotNil(t, firstAuthInvite.req.GetHeader("Proxy-Authorization"))
-	require.NoError(t, firstAuthInvite.transaction.SendResponse(sip.NewResponseFromRequest(firstAuthInvite.req, sip.StatusBusyHere, "Busy Here", nil)))
-
-	firstErr := <-firstResult
-	require.Error(t, firstErr)
-	require.True(t, outbound.shouldRetryInviteAfterBusy(firstErr))
-
-	retryResult := make(chan struct {
-		body []byte
-		err  error
-	}, 1)
-	go func() {
-		body, err := outbound.retryInviteAfterBusy(context.Background(), toURI, []byte("v=0\r\n"), nil)
-		retryResult <- struct {
-			body []byte
-			err  error
-		}{body: body, err: err}
-	}()
-
-	retryInvite := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
-	require.Equal(t, sip.INVITE, retryInvite.req.Method)
-	retryCallID := retryInvite.req.CallID().Value()
-	require.NotEqual(t, firstCallID, retryCallID)
-	require.Equal(t, uint32(1), retryInvite.req.CSeq().SeqNo)
-	require.Nil(t, retryInvite.req.GetHeader("Proxy-Authorization"))
-	sendProxyAuthRequired(t, retryInvite)
-
-	retryAuthInvite := waitTransaction(t, sipClient)
-	require.Equal(t, retryCallID, retryAuthInvite.req.CallID().Value())
-	require.Equal(t, uint32(2), retryAuthInvite.req.CSeq().SeqNo)
-	require.NotNil(t, retryAuthInvite.req.GetHeader("Proxy-Authorization"))
-	answer := []byte("v=0\r\n")
-	require.NoError(t, retryAuthInvite.transaction.SendResponse(sip.NewResponseFromRequest(retryAuthInvite.req, sip.StatusOK, "OK", answer)))
-
-	res := <-retryResult
-	require.NoError(t, res.err)
-	require.Equal(t, answer, res.body)
-}
-
 func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
@@ -368,30 +261,6 @@ func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 
 	require.NoError(t, authInvite.transaction.SendResponse(sip.NewResponseFromRequest(authInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n"))))
 	require.NoError(t, <-result)
-}
-
-func TestRetryInviteAfterBusyReturnsSecondBusy(t *testing.T) {
-	client := NewOutboundTestClient(t, TestClientConfig{})
-	sipClient := getCreatedSIPClient(t)
-	outbound := newTestOutboundCall(client)
-	toURI := CreateURIFromUserAndAddress("+79993441100", "sip.novofon.ru:5060", TransportUDP)
-
-	retryResult := make(chan error, 1)
-	go func() {
-		_, err := outbound.retryInviteAfterBusy(context.Background(), toURI, []byte("v=0\r\n"), nil)
-		retryResult <- err
-	}()
-
-	retryInvite := waitTransactionWithTimeout(t, sipClient, inviteRetryAfterBusyDelay+time.Second)
-	require.Equal(t, sip.INVITE, retryInvite.req.Method)
-	require.Equal(t, uint32(1), retryInvite.req.CSeq().SeqNo)
-	require.NoError(t, retryInvite.transaction.SendResponse(sip.NewResponseFromRequest(retryInvite.req, sip.StatusBusyHere, "Busy Here", nil)))
-
-	err := <-retryResult
-	require.Error(t, err)
-	var sipErr *livekit.SIPStatus
-	require.ErrorAs(t, err, &sipErr)
-	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE, sipErr.Code)
 }
 
 func TestOutboundInviteRequestTerminatedIsClientError(t *testing.T) {
