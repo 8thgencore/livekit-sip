@@ -77,10 +77,6 @@ const (
 	inviteRetryAfterBusyDelay          = 2 * time.Second
 )
 
-var outboundRegisterSkipHosts = map[string]struct{}{
-	"novofon.ru":     {},
-	"sip.novofon.ru": {},
-}
 
 var outboundRegistrationRequiredHosts = map[string]struct{}{
 	"pbx.uiscom.ru": {},
@@ -122,12 +118,6 @@ type outboundCall struct {
 	sipConf  sipOutboundConfig
 }
 
-func shouldSkipRegistrationForAddress(address string) bool {
-	host := normalizeSIPHost(address)
-	_, ok := outboundRegisterSkipHosts[host]
-	return ok
-}
-
 func requiresRegistrationForAddress(address string) bool {
 	host := normalizeSIPHost(address)
 	_, ok := outboundRegistrationRequiredHosts[host]
@@ -135,9 +125,6 @@ func requiresRegistrationForAddress(address string) bool {
 }
 
 func usesRegisterSkippedIPTrunk(sipConf sipOutboundConfig) bool {
-	if !shouldSkipRegistrationForAddress(sipConf.address) {
-		return false
-	}
 	return sipConf.registerMode == outboundRegisterModeDisabled ||
 		sipConf.registerMode == outboundRegisterModeAuto
 }
@@ -176,7 +163,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		Transport: tr,
 	}
 	var regProfile *ResolvedRegistrationConfig
-	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto && shouldSkipRegistrationForAddress(sipConf.address)) {
+	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto) {
 		var err error
 		regSipConf := sipConf
 		regSipConf.host = defaultHost

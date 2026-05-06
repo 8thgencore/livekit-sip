@@ -516,8 +516,12 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
+	const skipRegisterHost = "sip.no-register.example"
+	outboundRegisterSkipHosts[skipRegisterHost] = struct{}{}
+	t.Cleanup(func() { delete(outboundRegisterSkipHosts, skipRegisterHost) })
+
 	req := MinimalCreateSIPParticipantRequest()
-	req.Address = "sip.novofon.ru:5060"
+	req.Address = skipRegisterHost + ":5060"
 	req.Hostname = ""
 	req.Username = "5550104"
 	req.Password = "test-password"
@@ -537,11 +541,39 @@ func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRetries(t *testing.T) {
+func TestOutboundInviteAutoRegistersForNovofon(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
 	req.Address = "sip.novofon.ru:5060"
+	req.Hostname = ""
+	req.Username = "0101536"
+	req.Password = "test-password"
+	req.Number = "0101536"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRetries(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	const skipRegisterHost = "sip.no-register.example"
+	outboundRegisterSkipHosts[skipRegisterHost] = struct{}{}
+	t.Cleanup(func() { delete(outboundRegisterSkipHosts, skipRegisterHost) })
+
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = skipRegisterHost + ":5060"
 	req.Hostname = ""
 	req.Username = "0101536"
 	req.Password = "test-password"
