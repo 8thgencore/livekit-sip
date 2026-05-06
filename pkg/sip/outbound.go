@@ -232,7 +232,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		directContact: directContact,
 	}
 	call.stats.Update()
-	call.cc = c.newOutbound(log, id, fromURI, contact, sipConf.displayName, call.setAttrsToHeaders)
+	call.cc = c.newOutbound(log, id, from, contact, sipConf.displayName, call.setAttrsToHeaders)
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
 	call.cc.registerSkippedIPTrunk = usesRegisterSkippedIPTrunk(sipConf)
 	if sipConf.featureFlags[outboundRouteHeadersFeatureFlag] == "true" {
