@@ -249,7 +249,14 @@ func TestRegistrationExpiresPrefersContactExpires(t *testing.T) {
 	require.Equal(t, 20*time.Second, registrationExpires(resp, defaultRegisterExpiration))
 }
 
-func TestRegistrationBackgroundRefreshesBeforeExpiration(t *testing.T) {
+func TestRegistrationExpiresAppliesMinimumTTL(t *testing.T) {
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: mockRegistrarHost})
+	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
+	resp.AppendHeader(sip.NewHeader("Expires", "1"))
+	require.Equal(t, minRegisterExpiration, registrationExpires(resp, defaultRegisterExpiration))
+}
+
+func TestRegistrationBackgroundRefreshDoesNotSpinOnTinyExpiration(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -269,9 +276,11 @@ func TestRegistrationBackgroundRefreshesBeforeExpiration(t *testing.T) {
 	require.NoError(t, tx.transaction.SendResponse(ok))
 	require.NoError(t, <-done)
 
-	tx = waitTransactionWithTimeout(t, sipClient, 2*time.Second)
-	require.Equal(t, sip.REGISTER, tx.req.Method)
-	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	select {
+	case tx = <-sipClient.transactions:
+		t.Fatalf("unexpected immediate REGISTER refresh transaction: %v", tx.req.Method)
+	case <-time.After(2 * time.Second):
+	}
 }
 
 func TestEnsureRegisteredStoresSuccessfulRegisterTime(t *testing.T) {
