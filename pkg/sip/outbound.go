@@ -16,11 +16,14 @@ package sip
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,29 +69,85 @@ type sipOutboundConfig struct {
 	featureFlags    map[string]string
 	mediaConfig     *sipMediaConfig
 	displayName     *string
+	registerMode    outboundRegisterMode
+}
+
+const (
+	inviteRetryAfterFreshRegisterDelay = 2 * time.Second
+	inviteRetryAfterBusyDelay          = 2 * time.Second
+)
+
+var outboundRegisterSkipHosts = map[string]struct{}{
+	"novofon.ru":     {},
+	"sip.novofon.ru": {},
+}
+
+var outboundRegistrationRequiredHosts = map[string]struct{}{
+	"pbx.uiscom.ru": {},
+}
+
+type providerAuthConfigError struct {
+	address  string
+	fromUser string
+	status   sip.StatusCode
+}
+
+func (e providerAuthConfigError) Error() string {
+	return fmt.Sprintf("SIP IP trunk rejected INVITE auth with status %d for address %q and from user %q; verify public IP/port binding and outbound caller ID", e.status, e.address, e.fromUser)
 }
 
 type outboundCall struct {
-	c         *Client
-	tid       traceid.ID
-	log       logger.Logger
-	state     *CallState
-	callStart time.Time
-	cc        *sipOutbound
-	media     *MediaPort
-	started   core.Fuse
-	stopped   core.Fuse
-	closing   core.Fuse
-	stats     Stats
-	sigTs     SignalingTimestamps
-	jitterBuf bool
-	projectID string
+	c             *Client
+	tid           traceid.ID
+	log           logger.Logger
+	state         *CallState
+	regProfile    *ResolvedRegistrationConfig
+	callStart     time.Time
+	cc            *sipOutbound
+	media         *MediaPort
+	started       core.Fuse
+	stopped       core.Fuse
+	closing       core.Fuse
+	stats         Stats
+	sigTs         SignalingTimestamps
+	jitterBuf     bool
+	projectID     string
+	directFrom    URI
+	directContact URI
 
 	mu       sync.RWMutex
 	mon      *stats.CallMonitor
 	lkRoom   RoomInterface
 	lkRoomIn msdk.PCM16Writer // output to room; OPUS at 48k
 	sipConf  sipOutboundConfig
+}
+
+func shouldSkipRegistrationForAddress(address string) bool {
+	host := normalizeSIPHost(address)
+	_, ok := outboundRegisterSkipHosts[host]
+	return ok
+}
+
+func requiresRegistrationForAddress(address string) bool {
+	host := normalizeSIPHost(address)
+	_, ok := outboundRegistrationRequiredHosts[host]
+	return ok
+}
+
+func usesRegisterSkippedIPTrunk(sipConf sipOutboundConfig) bool {
+	if !shouldSkipRegistrationForAddress(sipConf.address) {
+		return false
+	}
+	return sipConf.registerMode == outboundRegisterModeDisabled ||
+		sipConf.registerMode == outboundRegisterModeAuto
+}
+
+func normalizeSIPHost(address string) string {
+	host := address
+	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
+		host = parsedHost
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Config, log logger.Logger, id LocalTag, room RoomConfig, sipConf sipOutboundConfig, state *CallState, projectID string) (*outboundCall, error) {
@@ -105,8 +164,45 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 
 	tr := TransportFrom(sipConf.transport)
 	contact := c.ContactURI(tr)
+	defaultHost := sipConf.host
 	if sipConf.host == "" {
 		sipConf.host = contact.GetHost()
+	}
+	directContact := contact
+	directFrom := URI{
+		User:      sipConf.from,
+		Host:      sipConf.host,
+		Addr:      directContact.Addr,
+		Transport: tr,
+	}
+	var regProfile *ResolvedRegistrationConfig
+	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto && shouldSkipRegistrationForAddress(sipConf.address)) {
+		var err error
+		regSipConf := sipConf
+		regSipConf.host = defaultHost
+		regProfile, err = c.ensureRegistered(ctx, regSipConf)
+		if sipConf.registerMode == outboundRegisterModeRequired && regProfile == nil && err == nil {
+			err = psrpc.NewError(psrpc.InvalidArgument, errors.New("sip registration requires address, username, and password"))
+		}
+		if err != nil {
+			if sipConf.registerMode == outboundRegisterModeRequired || regProfile == nil || !regProfile.InviteOnRegisterFailure {
+				return nil, err
+			}
+			log.Warnw("SIP registration attempt failed, continuing without registration", err,
+				"address", sipConf.address,
+				"transport", tr,
+				"username", sipConf.user,
+				"registrar", regProfile.Registrar.GetDest(),
+			)
+		}
+	}
+	if regProfile != nil {
+		if regProfile.FromDomain != "" && defaultHost == "" {
+			sipConf.host = regProfile.FromDomain
+		}
+		if regProfile.ContactUser != "" {
+			contact.User = regProfile.ContactUser
+		}
 	}
 	fromURI := URI{
 		User:      sipConf.from,
@@ -114,30 +210,41 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		Addr:      contact.Addr,
 		Transport: tr,
 	}
+	if regProfile != nil {
+		fromURI = URI{
+			User: sipConf.from,
+			Host: sipConf.host,
+		}
+	}
 	now := time.Now()
 	call := &outboundCall{
-		c:         c,
-		tid:       tid,
-		log:       log,
-		sipConf:   sipConf,
-		state:     state,
-		callStart: now,
-		sigTs:     SignalingTimestamps{APITime: now},
-		jitterBuf: jitterBuf,
-		projectID: projectID,
+		c:             c,
+		tid:           tid,
+		log:           log,
+		sipConf:       sipConf,
+		state:         state,
+		regProfile:    regProfile,
+		callStart:     now,
+		sigTs:         SignalingTimestamps{APITime: now},
+		jitterBuf:     jitterBuf,
+		projectID:     projectID,
+		directFrom:    directFrom,
+		directContact: directContact,
 	}
 	call.stats.Update()
 	call.cc = c.newOutbound(log, id, fromURI, contact, sipConf.displayName, call.setAttrsToHeaders)
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
+	call.cc.registerSkippedIPTrunk = usesRegisterSkippedIPTrunk(sipConf)
 	if sipConf.featureFlags[outboundRouteHeadersFeatureFlag] == "true" {
 		call.cc.routeHeaders = conf.OutboundRouteHeaders
 	}
 
 	call.mon = c.mon.NewCall(stats.Outbound, sipConf.host, sipConf.address)
-	var err error
 
+	var err error
 	call.media, err = NewMediaPort(tid, call.log, call.mon, &MediaOptions{
 		IP:                  c.sconf.MediaIP,
+		BindIP:              c.sconf.SignalingIPLocal,
 		Ports:               conf.RTPPort,
 		MediaTimeoutInitial: c.conf.MediaTimeoutInitial,
 		MediaTimeout:        c.conf.MediaTimeout,
@@ -239,6 +346,7 @@ func (c *outboundCall) WaitClose(ctx context.Context) error {
 	defer span.End()
 	return c.waitClose(ctx, c.tid)
 }
+
 func (c *outboundCall) waitClose(ctx context.Context, tid traceid.ID) error {
 	ctx = context.WithoutCancel(ctx)
 	defer c.ensureClosed(ctx)
@@ -388,15 +496,19 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.dialSIP(ctx, tid); err != nil {
-		c.log.Infow("SIP call failed", "error", err)
-
 		reportErr := err
 		status, term, reason := callDropped, stats.ServerError("invite-failed"), livekit.DisconnectReason_UNKNOWN_REASON
 		var e *livekit.SIPStatus
 		if errors.As(err, &e) {
 			switch int(e.Code) {
+			case int(sip.StatusRequestTerminated):
+				status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
+				reportErr = nil
 			case int(sip.StatusTemporarilyUnavailable):
 				status, term, reason = callUnavailable, stats.ClientError("unavailable"), livekit.DisconnectReason_USER_UNAVAILABLE
+				reportErr = nil
+			case int(sip.StatusRequestTimeout):
+				status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
 				reportErr = nil
 			case int(sip.StatusBusyHere):
 				status, term, reason = callRejected, stats.ClientError("busy"), livekit.DisconnectReason_USER_REJECTED
@@ -413,6 +525,14 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 			} else {
 				term = stats.ClientError("sdp-error")
 			}
+		} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
+			status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
+			reportErr = nil
+		}
+		if reportErr == nil {
+			c.log.Infow("SIP call ended with expected SIP status", "error", err)
+		} else {
+			c.log.Warnw("SIP call failed", err)
 		}
 		c.close(ctx, reportErr, status, term, reason)
 		return err
@@ -522,7 +642,10 @@ func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan stru
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "service shutting down")
 		case <-tx.Done():
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "transaction failed to complete (%d intermediate responses)", cnt)
-		case res := <-tx.Responses():
+		case res, ok := <-tx.Responses():
+			if !ok || res == nil {
+				return nil, psrpc.NewErrorf(psrpc.Canceled, "transaction response channel closed (%d intermediate responses)", cnt)
+			}
 			status := res.StatusCode
 			if setState != nil {
 				setState(res.StatusCode, res.Headers())
@@ -624,7 +747,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 	toUri := CreateURIFromUserAndAddress(c.sipConf.to, c.sipConf.address, TransportFrom(c.sipConf.transport))
 
 	ringing := false
-	sdpResp, err := c.cc.Invite(ctx, toUri, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, func(code sip.StatusCode, hdrs Headers) {
+	setState := func(code sip.StatusCode, hdrs Headers) {
 		if code == sip.StatusOK {
 			return // is set separately
 		}
@@ -637,7 +760,17 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			c.setStatus(CallRinging)
 		}
 		c.setExtraAttrs(nil, 0, nil, hdrs)
-	})
+	}
+	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	inviteRetried := false
+	if c.shouldRetryInviteWithoutRegistration(err) {
+		inviteRetried = true
+		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState)
+	}
+	if !inviteRetried && c.shouldRetryInviteAfterBusy(err) {
+		inviteRetried = true
+		sdpResp, err = c.retryInviteAfterBusy(ctx, toUri, sdpOfferData, setState)
+	}
 	// Update SIPCallInfo with the SIP Call-ID after Invite
 	if sipCallID := c.cc.SIPCallID(); sipCallID != "" {
 		c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
@@ -657,8 +790,17 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
 				info.CallStatusCode = e
 			})
+			c.log.Infow("SIP invite rejected",
+				"status", e.Code,
+				"reason", e.Status,
+				"sdpOffer", string(sdpOfferData),
+			)
 		} else {
 			c.mon.InviteError("other")
+			c.log.Infow("SIP invite failed without SIP status",
+				"error", err,
+				"sdpOffer", string(sdpOfferData),
+			)
 		}
 		c.cc.Close(ctx)
 		c.log.Infow("SIP invite failed", "error", err)
@@ -699,6 +841,73 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		}
 	})
 	return nil
+}
+
+func (c *outboundCall) shouldRetryInviteWithoutRegistration(err error) bool {
+	if c == nil || c.regProfile == nil || c.sipConf.registerMode != outboundRegisterModeAuto {
+		return false
+	}
+	if requiresRegistrationForAddress(c.sipConf.address) {
+		return false
+	}
+	var sipErr *livekit.SIPStatus
+	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
+}
+
+func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
+	c.log.Infow("retrying SIP INVITE without outbound REGISTER profile",
+		"retry_reason", "registered_invite_busy_here",
+		"registerMode", c.sipConf.registerMode.String(),
+	)
+	c.cc.Close(ctx)
+	getHeaders := c.cc.getHeaders
+	nextCSeq := c.cc.nextCSeq
+	c.cc = c.c.newOutbound(c.log, c.cc.ID(), c.directFrom, c.directContact, c.sipConf.displayName, getHeaders)
+	c.cc.nextCSeq = nextCSeq
+	c.regProfile = nil
+	c.mon.InviteReq()
+	return c.cc.Invite(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+}
+
+func (c *outboundCall) shouldRetryInviteAfterBusy(err error) bool {
+	if c == nil || c.closing.IsBroken() {
+		return false
+	}
+	var sipErr *livekit.SIPStatus
+	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
+}
+
+func (c *outboundCall) retryInviteAfterBusy(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
+	previousSIPCallID := ""
+	if c.cc != nil {
+		previousSIPCallID = c.cc.SIPCallID()
+	}
+	c.log.Infow("retrying SIP INVITE after busy response",
+		"original_status", sip.StatusBusyHere,
+		"retry_attempt", 1,
+		"retry_delay_ms", inviteRetryAfterBusyDelay.Milliseconds(),
+		"previous_sip_call_id", previousSIPCallID,
+		"to", toUri.GetURI().String(),
+	)
+	timer := time.NewTimer(inviteRetryAfterBusyDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closing.Watch():
+		return nil, errors.New("outbound call closing")
+	case <-c.c.closing.Watch():
+		return nil, errors.New("SIP client closed")
+	}
+	c.mon.InviteReq()
+	sdpResp, err := c.cc.InviteWithFreshCallID(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	if err != nil {
+		c.log.Infow("SIP INVITE busy retry failed", "error", err)
+		return nil, err
+	}
+	c.log.Infow("SIP INVITE busy retry succeeded", "sipCallID", c.cc.SIPCallID())
+	return sdpResp, nil
 }
 
 func (c *outboundCall) handleDTMF(ev dtmf.Event) {
@@ -792,12 +1001,13 @@ func (c *Client) newOutbound(log logger.Logger, id LocalTag, from, contact URI, 
 }
 
 type sipOutbound struct {
-	log          logger.Logger
-	c            *Client
-	id           LocalTag
-	from         *sip.FromHeader
-	contact      *sip.ContactHeader
-	routeHeaders []string
+	log                    logger.Logger
+	c                      *Client
+	id                     LocalTag
+	from                   *sip.FromHeader
+	contact                *sip.ContactHeader
+	routeHeaders           []string
+	registerSkippedIPTrunk bool
 
 	mu         sync.RWMutex
 	tag        RemoteTag
@@ -905,12 +1115,28 @@ func (c *sipOutbound) RemoteHeaders() Headers {
 	return c.inviteOk.Headers()
 }
 
-func (c *sipOutbound) Invite(ctx context.Context, to URI, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
+func (c *sipOutbound) Invite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, false)
+}
+
+func (c *sipOutbound) InviteWithFreshCallID(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, true)
+}
+
+func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, freshCallID bool) ([]byte, error) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.Invite")
 	defer span.End()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	toHeader := &sip.ToHeader{Address: *to.GetURI()}
+
+	if freshCallID {
+		c.callID = guid.New("call_")
+		c.nextCSeq = 1
+	} else {
+		c.callID = guid.HashedID(fmt.Sprintf("%s-%s", string(c.id), toHeader.Address.String()))
+	}
+	c.log = c.log.WithValues("sipCallID", c.callID)
 
 	var (
 		sipHeaders         Headers
@@ -919,6 +1145,9 @@ func (c *sipOutbound) Invite(ctx context.Context, to URI, user, pass string, hea
 		req                *sip.Request
 		resp               *sip.Response
 		err                error
+		lastAuthStatus     sip.StatusCode
+		lastAuthAddress    string
+		lastAuthFromUser   string
 	)
 	if keys := maps.Keys(headers); len(keys) != 0 {
 		sort.Strings(keys)
@@ -926,9 +1155,17 @@ func (c *sipOutbound) Invite(ctx context.Context, to URI, user, pass string, hea
 			sipHeaders = append(sipHeaders, sip.NewHeader(key, headers[key]))
 		}
 	}
+	inviteRetried := false
 authLoop:
 	for try := 0; ; try++ {
-		if try >= 5 {
+		if try >= inviteAuthMaxAttempts {
+			if c.registerSkippedIPTrunk && lastAuthStatus != 0 {
+				return nil, psrpc.NewError(psrpc.FailedPrecondition, providerAuthConfigError{
+					address:  lastAuthAddress,
+					fromUser: lastAuthFromUser,
+					status:   lastAuthStatus,
+				})
+			}
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
 		}
 		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState)
@@ -940,15 +1177,29 @@ authLoop:
 		case sip.StatusOK:
 			break authLoop
 		default:
+			c.logInviteFinalResponse(resp)
 			return nil, fmt.Errorf("unexpected status from INVITE response: %w", &livekit.SIPStatus{
 				Code:   livekit.SIPStatusCode(resp.StatusCode),
 				Status: resp.Reason,
 			})
 		case sip.StatusBadRequest,
 			sip.StatusNotFound,
+			sip.StatusRequestTerminated,
 			sip.StatusTemporarilyUnavailable,
+			sip.StatusServiceUnavailable,
 			sip.StatusNotAcceptableHere,
 			sip.StatusBusyHere:
+			if !inviteRetried {
+				retried, err := c.retryInviteAfterFreshRegister(ctx, regProfile, pass, resp)
+				if err != nil {
+					return nil, err
+				}
+				if retried {
+					inviteRetried = true
+					continue
+				}
+			}
+			c.logInviteFinalResponse(resp)
 			err := &livekit.SIPStatus{
 				Code:   livekit.SIPStatusCode(resp.StatusCode),
 				Status: resp.Reason,
@@ -967,6 +1218,9 @@ authLoop:
 			authHeaderRespName = "Proxy-Authorization"
 		}
 		c.log.Infow("auth requested", "status", resp.StatusCode, "body", string(resp.Body()))
+		lastAuthStatus = resp.StatusCode
+		lastAuthAddress = req.Recipient.Host
+		lastAuthFromUser = c.from.Address.User
 		// auth required
 		if user == "" || pass == "" {
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, errors.New("sip server required auth, but no username or password was provided"))
@@ -980,24 +1234,21 @@ authLoop:
 		if err != nil {
 			return nil, fmt.Errorf("invalid challenge %q: %w", challengeStr, err)
 		}
-		toHeader := resp.To()
-		if toHeader == nil {
-			return nil, errors.New("no 'To' header on Response")
-		}
-
+		c.log.Infow("SIP INVITE auth challenge parsed", inviteAuthChallengeLogFields(resp.StatusCode, authHeaderName, authHeaderRespName, challenge)...)
+		digestURI := req.Recipient.String()
 		cred, err := digest.Digest(challenge, digest.Options{
 			Method:   req.Method.String(),
-			URI:      toHeader.Address.String(),
+			URI:      digestURI,
 			Username: user,
 			Password: pass,
 		})
 		if err != nil {
 			return nil, err
 		}
+		c.log.Infow("SIP INVITE auth response prepared", inviteAuthResponseLogFields(authHeaderRespName, req, cred, digestURI)...)
 		authHeader = cred.String()
 		// Try again with a computed digest
 	}
-
 	c.invite, c.inviteOk = req, resp
 	toHeader = resp.To()
 	if toHeader == nil {
@@ -1025,6 +1276,42 @@ authLoop:
 	}
 
 	return c.inviteOk.Body(), nil
+}
+
+func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProfile *ResolvedRegistrationConfig, password string, resp *sip.Response) (bool, error) {
+	if c == nil || c.c == nil || c.c.registrationManager == nil || regProfile == nil || resp == nil {
+		return false, nil
+	}
+	if resp.StatusCode != sip.StatusTemporarilyUnavailable && resp.StatusCode != sip.StatusServiceUnavailable {
+		return false, nil
+	}
+	age, ok := c.c.registrationManager.freshSuccessfulRegisterAge(regProfile.cacheKey(), freshRegisterInviteRetry)
+	if !ok {
+		return false, nil
+	}
+	c.log.Infow("retrying SIP INVITE after fresh REGISTER",
+		"retry_reason", "fresh_register_temporary_failure",
+		"original_status", resp.StatusCode,
+		"fresh_register_age_ms", age.Milliseconds(),
+		"retry_attempt", 1,
+	)
+	timer := time.NewTimer(inviteRetryAfterFreshRegisterDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		c.log.Infow("forcing SIP REGISTER before INVITE retry",
+			"retry_reason", "fresh_register_temporary_failure",
+			"original_status", resp.StatusCode,
+		)
+		if err := c.c.forceRegister(ctx, regProfile, password); err != nil {
+			return false, err
+		}
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-c.c.closing.Watch():
+		return false, errors.New("SIP client closed")
+	}
 }
 
 func (c *sipOutbound) AcceptBye(req *sip.Request, tx sip.ServerTransaction) {
@@ -1059,6 +1346,7 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 	req.AppendHeader(c.contact)
 
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	req.AppendHeader(sip.NewHeader("User-Agent", UserAgent))
 	req.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE"))
 
 	if authHeader != "" {
@@ -1077,6 +1365,7 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 		return nil, nil, err
 	}
 	defer tx.Terminate()
+	c.log.Infow("SIP INVITE request prepared", inviteRequestLogFields(req)...)
 
 	// Log the actual local port used for TCP connections from the DialPort range
 	if req.Transport() == "TCP" {
@@ -1098,6 +1387,164 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 
 	resp, err := sipResponse(ctx, tx, c.c.closing.Watch(), setState)
 	return req, resp, err
+}
+
+func (c *sipOutbound) logInviteFinalResponse(resp *sip.Response) {
+	if resp == nil {
+		return
+	}
+	fields := []interface{}{
+		"status", resp.StatusCode,
+		"reason", resp.Reason,
+		"body", string(resp.Body()),
+	}
+	for _, name := range []string{"Retry-After", "Reason", "Warning", "Server", "X-Twilio-Error"} {
+		if h := resp.GetHeader(name); h != nil {
+			fields = append(fields, name, h.Value())
+		}
+	}
+	c.log.Infow("SIP INVITE final response received", fields...)
+}
+
+func inviteRequestLogFields(req *sip.Request) []interface{} {
+	fields := []interface{}{
+		"method", req.Method,
+		"request_uri", req.Recipient.String(),
+		"transport", req.Transport(),
+		"dest_addr", req.Destination(),
+		"local_addr", req.Source(),
+		"content_length", len(req.Body()),
+	}
+	if h := req.From(); h != nil {
+		fields = append(fields,
+			"from_uri", h.Address.String(),
+			"from_display_name", h.DisplayName,
+		)
+	}
+	if h := req.To(); h != nil {
+		fields = append(fields,
+			"to_uri", h.Address.String(),
+			"to_display_name", h.DisplayName,
+		)
+	}
+	if h := req.Contact(); h != nil {
+		fields = append(fields, "contact_uri", h.Address.String())
+	}
+	if h := req.Via(); h != nil {
+		fields = append(fields,
+			"via_sent_by", h.SentBy(),
+			"via_transport", h.Transport,
+		)
+	}
+	if h := req.CallID(); h != nil {
+		fields = append(fields, "sip_call_id", h.Value())
+	}
+	if h := req.CSeq(); h != nil {
+		fields = append(fields,
+			"cseq", h.SeqNo,
+			"cseq_method", h.MethodName,
+		)
+	}
+	if h := req.ContentType(); h != nil {
+		fields = append(fields, "content_type", h.Value())
+	}
+	if h := req.GetHeader("User-Agent"); h != nil {
+		fields = append(fields, "user_agent", h.Value())
+	}
+	fields = append(fields,
+		"has_authorization", req.GetHeader("Authorization") != nil,
+		"has_proxy_authorization", req.GetHeader("Proxy-Authorization") != nil,
+		"headers", sanitizedHeaderValues(req.Headers()),
+	)
+	if routes := headerValues(req.GetHeaders("Route")); len(routes) != 0 {
+		fields = append(fields, "route_headers", routes)
+	}
+	if reasons := headerValues(req.GetHeaders("Reason")); len(reasons) != 0 {
+		fields = append(fields, "reason_headers", reasons)
+	}
+	return fields
+}
+
+func inviteAuthChallengeLogFields(status sip.StatusCode, authHeaderName, authHeaderRespName string, challenge *digest.Challenge) []interface{} {
+	fields := []interface{}{
+		"status", status,
+		"auth_challenge_header", authHeaderName,
+		"auth_response_header", authHeaderRespName,
+	}
+	if challenge == nil {
+		return fields
+	}
+	fields = append(fields,
+		"realm", challenge.Realm,
+		"algorithm", challenge.Algorithm,
+		"qop", challenge.QOP,
+		"stale", challenge.Stale,
+		"domain", challenge.Domain,
+		"nonce_hash", shortSHA256Hex(challenge.Nonce),
+		"nonce_len", len(challenge.Nonce),
+		"opaque_present", challenge.Opaque != "",
+	)
+	return fields
+}
+
+func inviteAuthResponseLogFields(authHeaderRespName string, req *sip.Request, cred *digest.Credentials, digestURI string) []interface{} {
+	fields := []interface{}{
+		"auth_response_header", authHeaderRespName,
+		"digest_uri", digestURI,
+		"has_proxy_authorization", authHeaderRespName == "Proxy-Authorization",
+	}
+	if req != nil {
+		fields = append(fields, "request_uri", req.Recipient.String())
+	}
+	if cred == nil {
+		return fields
+	}
+	fields = append(fields,
+		"username", cred.Username,
+		"algorithm", cred.Algorithm,
+		"qop", cred.QOP,
+		"nc", cred.Nc,
+	)
+	return fields
+}
+
+func shortSHA256Hex(value string) string {
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func sanitizedHeaderValues(headers []sip.Header) map[string][]string {
+	out := make(map[string][]string, len(headers))
+	for _, h := range headers {
+		name := h.Name()
+		if isSensitiveSIPHeader(name) {
+			continue
+		}
+		out[name] = append(out[name], h.Value())
+	}
+	return out
+}
+
+func isSensitiveSIPHeader(name string) bool {
+	name = strings.ToLower(name)
+	return name == "authorization" ||
+		name == "proxy-authorization" ||
+		name == "www-authenticate" ||
+		name == "proxy-authenticate"
+}
+
+func headerValues(headers []sip.Header) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(headers))
+	for _, h := range headers {
+		values = append(values, h.Value())
+	}
+	return values
 }
 
 func (c *sipOutbound) WriteRequest(req *sip.Request) error {
@@ -1122,7 +1569,7 @@ func (c *sipOutbound) sendBye(ctx context.Context) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.sendBye")
 	defer span.End()
 	r := sip.NewByeRequest(c.invite, c.inviteOk, nil)
-	r.AppendHeader(sip.NewHeader("User-Agent", "LiveKit"))
+	r.AppendHeader(sip.NewHeader("User-Agent", "AI-MOP"))
 	if c.getHeaders != nil {
 		for k, v := range c.getHeaders(nil) {
 			r.AppendHeader(sip.NewHeader(k, v))
@@ -1146,7 +1593,7 @@ func (c *sipOutbound) sendCancel(ctx context.Context) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.sendCancel")
 	defer span.End()
 	r := sip.NewCancelRequest(c.invite)
-	r.AppendHeader(sip.NewHeader("User-Agent", "LiveKit"))
+	r.AppendHeader(sip.NewHeader("User-Agent", "AI-MOP"))
 	if c.getHeaders != nil {
 		for k, v := range c.getHeaders(nil) {
 			r.AppendHeader(sip.NewHeader(k, v))

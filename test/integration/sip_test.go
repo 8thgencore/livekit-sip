@@ -29,6 +29,7 @@ import (
 	"github.com/livekit/psrpc"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	sipgo "github.com/livekit/sipgo/sip"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/livekit/sip/pkg/config"
 	"github.com/livekit/sip/pkg/service"
@@ -140,11 +141,54 @@ type NumberConfig struct {
 	AuthPass string
 }
 
+func setOptionalIntField(msg protoreflect.Message, name protoreflect.Name, value int) {
+	fd := msg.Descriptor().Fields().ByName(name)
+	if fd == nil {
+		return
+	}
+	switch fd.Kind() {
+	case protoreflect.Int32Kind, protoreflect.Int64Kind:
+		msg.Set(fd, protoreflect.ValueOfInt64(int64(value)))
+	case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+		msg.Set(fd, protoreflect.ValueOfUint64(uint64(value)))
+	}
+}
+
+func setOptionalTransportField(msg protoreflect.Message, tr livekit.SIPTransport) {
+	for _, name := range []protoreflect.Name{"protocol", "transport"} {
+		fd := msg.Descriptor().Fields().ByName(name)
+		if fd == nil {
+			continue
+		}
+		switch fd.Kind() {
+		case protoreflect.EnumKind:
+			msg.Set(fd, protoreflect.ValueOfEnum(protoreflect.EnumNumber(tr)))
+			return
+		case protoreflect.StringKind:
+			msg.Set(fd, protoreflect.ValueOfString(tr.String()))
+			return
+		}
+	}
+}
+
+func setOptionalPortAndProtocol(msg protoreflect.Message, address string, tr livekit.SIPTransport) {
+	port := 5060
+	if _, sPort, err := net.SplitHostPort(address); err == nil {
+		if p, err := strconv.Atoi(sPort); err == nil && p > 0 {
+			port = p
+		}
+	}
+	setOptionalIntField(msg, "port", port)
+	setOptionalTransportField(msg, tr)
+}
+
 func (s *SIPServer) CreateTrunkOut(t testing.TB, trunk *livekit.SIPOutboundTrunkInfo) string {
 	ctx := context.Background()
-	tr, err := s.Client.CreateSIPOutboundTrunk(ctx, &livekit.CreateSIPOutboundTrunkRequest{
+	req := &livekit.CreateSIPOutboundTrunkRequest{
 		Trunk: trunk,
-	})
+	}
+	setOptionalPortAndProtocol(req.ProtoReflect(), trunk.Address, trunk.Transport)
+	tr, err := s.Client.CreateSIPOutboundTrunk(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,9 +198,11 @@ func (s *SIPServer) CreateTrunkOut(t testing.TB, trunk *livekit.SIPOutboundTrunk
 
 func (s *SIPServer) CreateTrunkIn(t testing.TB, trunk *livekit.SIPInboundTrunkInfo) string {
 	ctx := context.Background()
-	tr, err := s.Client.CreateSIPInboundTrunk(ctx, &livekit.CreateSIPInboundTrunkRequest{
+	req := &livekit.CreateSIPInboundTrunkRequest{
 		Trunk: trunk,
-	})
+	}
+	setOptionalPortAndProtocol(req.ProtoReflect(), s.Address, livekit.SIPTransport_SIP_TRANSPORT_UDP)
+	tr, err := s.Client.CreateSIPInboundTrunk(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}

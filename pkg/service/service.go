@@ -33,6 +33,7 @@ import (
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/psrpc"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"github.com/livekit/sip/pkg/stats"
 
@@ -50,6 +51,7 @@ type Service struct {
 
 	psrpcServer rpc.SIPInternalServerImpl
 	psrpcClient rpc.IOInfoClient
+	sipClient   *lksdk.SIPClient
 	bus         psrpc.MessageBus
 
 	promServer   *http.Server
@@ -81,6 +83,9 @@ func NewService(
 		sipServiceActiveCalls: sipServiceActiveCalls,
 
 		mon: mon,
+	}
+	if conf.WsUrl != "" && conf.ApiKey != "" && conf.ApiSecret != "" {
+		s.sipClient = lksdk.NewSIPClient(conf.WsUrl, conf.ApiKey, conf.ApiSecret)
 	}
 	if conf.PrometheusPort > 0 {
 		s.promServer = &http.Server{
@@ -210,7 +215,12 @@ func (s *Service) Run() error {
 }
 
 func (s *Service) GetAuthCredentials(ctx context.Context, call *rpc.SIPCall) (sip.AuthInfo, error) {
-	return GetAuthCredentials(ctx, s.psrpcClient, call)
+	info, err := GetAuthCredentials(ctx, s.psrpcClient, call)
+	if err != nil {
+		return info, err
+	}
+	enriched := s.enrichRegisterFromInboundTrunkMetadata(ctx, info)
+	return enriched, nil
 }
 
 func (s *Service) DispatchCall(ctx context.Context, info *sip.CallInfo) sip.CallDispatch {

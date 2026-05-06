@@ -417,7 +417,7 @@ func (c *Client) attemptInvite(ip, host, number string, offer []byte, authHeader
 func (c *Client) sendBye() {
 	c.log.Debug("sending bye")
 	req := sip.NewByeRequest(c.inviteReq, c.inviteResp, nil)
-	req.AppendHeader(sip.NewHeader("User-Agent", "LiveKit"))
+	req.AppendHeader(sip.NewHeader("User-Agent", "AI-MOP"))
 
 	cseq := c.lastCSeq.Add(1)
 	cseqH := req.CSeq()
@@ -548,7 +548,7 @@ func (c *Client) createOffer() ([]byte, error) {
 			AddressType:    "IP4",
 			UnicastAddress: c.conf.IP.String(),
 		},
-		SessionName: "LiveKit",
+		SessionName: "AI-MOP",
 		ConnectionInformation: &sdp.ConnectionInformation{
 			NetworkType: "IN",
 			AddressType: "IP4",

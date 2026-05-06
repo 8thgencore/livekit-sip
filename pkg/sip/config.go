@@ -29,12 +29,13 @@ import (
 
 func GetServiceConfig(conf *config.Config) (*ServiceConfig, error) {
 	s := new(ServiceConfig)
-	var err error
+	localIP, err := getSignalingLocalIP(conf)
+	if err != nil {
+		return nil, err
+	}
+	s.SignalingIPLocal = localIP
 	if conf.UseExternalIP {
 		if s.SignalingIP, err = getPublicIP(); err != nil {
-			return nil, err
-		}
-		if s.SignalingIPLocal, err = getLocalIP(conf.LocalNet); err != nil {
 			return nil, err
 		}
 	} else if conf.NAT1To1IP != "" {
@@ -43,12 +44,8 @@ func GetServiceConfig(conf *config.Config) (*ServiceConfig, error) {
 			return nil, err
 		}
 		s.SignalingIP = ip
-		s.SignalingIPLocal = s.SignalingIP
 	} else {
-		if s.SignalingIP, err = getLocalIP(conf.LocalNet); err != nil {
-			return nil, err
-		}
-		s.SignalingIPLocal = s.SignalingIP
+		s.SignalingIP = s.SignalingIPLocal
 	}
 	if conf.MediaUseExternalIP && !conf.UseExternalIP {
 		if s.MediaIP, err = getPublicIP(); err != nil {
@@ -64,6 +61,19 @@ func GetServiceConfig(conf *config.Config) (*ServiceConfig, error) {
 		s.MediaIP = s.SignalingIP
 	}
 	return s, nil
+}
+
+func getSignalingLocalIP(conf *config.Config) (netip.Addr, error) {
+	if conf.ListenIP != "" {
+		ip, err := netip.ParseAddr(conf.ListenIP)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		if ip.IsValid() && !ip.IsUnspecified() {
+			return ip, nil
+		}
+	}
+	return getLocalIP(conf.LocalNet)
 }
 
 func getPublicIP() (netip.Addr, error) {

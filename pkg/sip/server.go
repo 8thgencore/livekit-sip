@@ -44,7 +44,7 @@ import (
 )
 
 const (
-	UserAgent   = "LiveKit"
+	UserAgent   = "AI-MOP"
 	digestLimit = 500
 )
 
@@ -81,6 +81,8 @@ type AuthInfo struct {
 	TrunkID      string
 	Username     string
 	Password     string
+	RegisterAddr string
+	RegisterTr   livekit.SIPTransport
 	ProviderInfo *livekit.ProviderInfo
 }
 

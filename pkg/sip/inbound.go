@@ -281,6 +281,43 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	return true
 }
 
+func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) bool {
+	if s == nil || s.cli == nil {
+		return false
+	}
+	if auth.Username == "" || auth.Password == "" || auth.RegisterAddr == "" {
+		return false
+	}
+	regConf := sipOutboundConfig{
+		address:      auth.RegisterAddr,
+		transport:    auth.RegisterTr,
+		user:         auth.Username,
+		pass:         auth.Password,
+		registerMode: outboundRegisterModeAuto,
+	}
+	if regConf.transport == livekit.SIPTransport_SIP_TRANSPORT_AUTO {
+		regConf.transport = livekit.SIPTransport_SIP_TRANSPORT_UDP
+	}
+	conf, err := s.cli.ensureRegistered(ctx, regConf)
+	if err != nil {
+		log.Warnw("SIP inbound REGISTER attempt failed, continuing without registration", err,
+			"registrar", auth.RegisterAddr,
+			"transport", TransportFrom(regConf.transport),
+			"authUser", auth.Username,
+		)
+		return false
+	}
+	if conf != nil {
+		log.Infow("SIP inbound REGISTER ensured",
+			"registrar", conf.Registrar.GetDest(),
+			"transport", conf.Transport,
+			"authUser", conf.AuthUsername,
+		)
+		return true
+	}
+	return false
+}
+
 func (s *Server) onInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
 	// Error processed in defer
 	_ = s.processInvite(req, tx)
@@ -451,12 +488,20 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 		cc.RespondAndDrop(sip.StatusNotFound, "No trunk found")
 		return psrpc.NewErrorf(psrpc.NotFound, "no trunk found for call")
 	case AuthPassword:
+		registered := s.ensureInboundRegistered(ctx, log, r)
 		if s.conf.HideInboundPort {
 			// We will send password request anyway, so might as well signal that the progress is made.
 			cc.Processing()
 			tryingTime = time.Now()
 		}
 		s.getCallInfo(cc.ID()).countInvite(log, req)
+		if registered {
+			log.Infow("SIP inbound REGISTER verified, accepting INVITE without digest challenge",
+				"registrar", r.RegisterAddr,
+				"authUser", r.Username,
+			)
+			break
+		}
 		if !s.handleInviteAuth(tid, log, req, tx, from.User, r.Username, r.Password) {
 			// Store (call-ID + from tag) to (to tag) mapping
 			s.cmu.Lock()
@@ -730,7 +775,6 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 	if disp.DispatchRuleID != "" {
 		c.appendLogValues("sipRule", disp.DispatchRuleID)
 	}
-
 	c.state.Update(ctx, func(info *livekit.SIPCallInfo) {
 		info.TrunkId = disp.TrunkID
 		info.DispatchRuleId = disp.DispatchRuleID
@@ -1001,6 +1045,7 @@ func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, m *livekit.
 	logSignalChanges, _ = strconv.ParseBool(featureFlags[signalLoggingFeatureFlag])
 	mp, err := NewMediaPort(tid, c.log(), c.mon, &MediaOptions{
 		IP:                  c.s.sconf.MediaIP,
+		BindIP:              c.s.sconf.SignalingIPLocal,
 		Ports:               conf.RTPPort,
 		MediaTimeoutInitial: c.s.conf.MediaTimeoutInitial,
 		MediaTimeout:        c.s.conf.MediaTimeout,

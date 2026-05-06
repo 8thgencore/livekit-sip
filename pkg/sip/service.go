@@ -70,6 +70,7 @@ type Service struct {
 
 	mu               sync.Mutex
 	pendingTransfers map[LocalTag]*PendingTransfer
+	stopRegSync      context.CancelFunc
 }
 
 type GetIOInfoClient func(projectID string) rpc.IOInfoClient
@@ -186,6 +187,7 @@ func (s *Service) ActiveCalls() ActiveCalls {
 }
 
 func (s *Service) Stop() {
+	s.stopInboundRegisterSync()
 	s.cli.Stop()
 	s.srv.Stop()
 	s.mon.Stop()
@@ -305,6 +307,7 @@ func (s *Service) Start() error {
 	if err := s.srv.Start(ua, s.sconf, tlsConf, s.cli.OnRequest); err != nil {
 		return err
 	}
+	s.startInboundRegisterSync()
 	s.log.Debugw("sip service ready")
 	return nil
 }

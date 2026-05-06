@@ -4,11 +4,53 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/livekit/sip/pkg/sip"
 )
+
+func optionalStringField(msg protoreflect.Message, names ...protoreflect.Name) string {
+	if !msg.IsValid() {
+		return ""
+	}
+	fields := msg.Descriptor().Fields()
+	for _, name := range names {
+		fd := fields.ByName(name)
+		if fd == nil {
+			continue
+		}
+		switch fd.Kind() {
+		case protoreflect.StringKind:
+			return msg.Get(fd).String()
+		}
+	}
+	return ""
+}
+
+func optionalSIPTransportField(msg protoreflect.Message, names ...protoreflect.Name) livekit.SIPTransport {
+	if !msg.IsValid() {
+		return livekit.SIPTransport_SIP_TRANSPORT_AUTO
+	}
+	fields := msg.Descriptor().Fields()
+	for _, name := range names {
+		fd := fields.ByName(name)
+		if fd == nil {
+			continue
+		}
+		switch fd.Kind() {
+		case protoreflect.EnumKind:
+			return livekit.SIPTransport(msg.Get(fd).Enum())
+		case protoreflect.Int32Kind, protoreflect.Int64Kind:
+			return livekit.SIPTransport(msg.Get(fd).Int())
+		case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+			return livekit.SIPTransport(msg.Get(fd).Uint())
+		}
+	}
+	return livekit.SIPTransport_SIP_TRANSPORT_AUTO
+}
 
 func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call *rpc.SIPCall) (sip.AuthInfo, error) {
 	ctx, span := sip.Tracer.Start(ctx, "service.GetAuthCredentials")
@@ -27,6 +69,15 @@ func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call 
 	if err != nil {
 		return sip.AuthInfo{}, err
 	}
+	registerAddr := optionalStringField(resp.ProtoReflect(),
+		"register_address",
+		"register_addr",
+		"address",
+	)
+	registerTr := optionalSIPTransportField(resp.ProtoReflect(),
+		"register_transport",
+		"transport",
+	)
 
 	// Handle specific authentication error codes
 	switch resp.ErrorCode {
@@ -34,12 +85,16 @@ func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call 
 		return sip.AuthInfo{
 			ProjectID:    resp.ProjectId,
 			Result:       sip.AuthQuotaExceeded,
+			RegisterAddr: registerAddr,
+			RegisterTr:   registerTr,
 			ProviderInfo: resp.ProviderInfo,
 		}, nil
 	case rpc.SIPTrunkAuthenticationError_SIP_TRUNK_AUTH_ERROR_NO_TRUNK_FOUND:
 		return sip.AuthInfo{
 			ProjectID:    resp.ProjectId,
 			Result:       sip.AuthNoTrunkFound,
+			RegisterAddr: registerAddr,
+			RegisterTr:   registerTr,
 			ProviderInfo: resp.ProviderInfo,
 		}, nil
 	}
@@ -48,6 +103,8 @@ func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call 
 		return sip.AuthInfo{
 			ProjectID:    resp.ProjectId,
 			Result:       sip.AuthDrop,
+			RegisterAddr: registerAddr,
+			RegisterTr:   registerTr,
 			ProviderInfo: resp.ProviderInfo,
 		}, nil
 	}
@@ -58,6 +115,8 @@ func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call 
 			Result:       sip.AuthPassword,
 			Username:     resp.Username,
 			Password:     resp.Password,
+			RegisterAddr: registerAddr,
+			RegisterTr:   registerTr,
 			ProviderInfo: resp.ProviderInfo,
 		}, nil
 	}
@@ -65,6 +124,8 @@ func GetAuthCredentials(ctx context.Context, psrpcClient rpc.IOInfoClient, call 
 		ProjectID:    resp.ProjectId,
 		TrunkID:      resp.SipTrunkId,
 		Result:       sip.AuthAccept,
+		RegisterAddr: registerAddr,
+		RegisterTr:   registerTr,
 		ProviderInfo: resp.ProviderInfo,
 	}, nil
 }

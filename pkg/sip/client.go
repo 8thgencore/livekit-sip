@@ -32,6 +32,8 @@ import (
 	"github.com/livekit/psrpc"
 	"github.com/livekit/sipgo"
 	"github.com/livekit/sipgo/sip"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/livekit/sip/pkg/config"
 	siperrors "github.com/livekit/sip/pkg/errors"
@@ -66,10 +68,63 @@ type Client struct {
 	cmu         sync.Mutex
 	activeCalls map[LocalTag]*outboundCall
 
+	registrationManager *RegistrationManager
+
 	handler      Handler
 	getIOClient  GetIOInfoClient
 	getSipClient GetSipClientFunc
 	getRoom      GetRoomFunc
+}
+
+const internalCreateSIPParticipantRegisterModeField protowire.Number = 34
+const internalCreateSIPParticipantRegisterModeName protoreflect.Name = "register_mode"
+
+func outboundRegisterModeFromRequest(req *rpc.InternalCreateSIPParticipantRequest) outboundRegisterMode {
+	if req == nil {
+		return outboundRegisterModeAuto
+	}
+	msg := req.ProtoReflect()
+	if fd := msg.Descriptor().Fields().ByName(internalCreateSIPParticipantRegisterModeName); fd != nil {
+		switch fd.Kind() {
+		case protoreflect.EnumKind:
+			return normalizeOutboundRegisterMode(uint64(msg.Get(fd).Enum()))
+		case protoreflect.Int32Kind, protoreflect.Int64Kind:
+			return normalizeOutboundRegisterMode(uint64(msg.Get(fd).Int()))
+		case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+			return normalizeOutboundRegisterMode(msg.Get(fd).Uint())
+		}
+	}
+	b := msg.GetUnknown()
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return outboundRegisterModeAuto
+		}
+		b = b[n:]
+		if num != internalCreateSIPParticipantRegisterModeField || typ != protowire.VarintType {
+			n = protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return outboundRegisterModeAuto
+			}
+			b = b[n:]
+			continue
+		}
+		v, n := protowire.ConsumeVarint(b)
+		if n < 0 {
+			return outboundRegisterModeAuto
+		}
+		return normalizeOutboundRegisterMode(v)
+	}
+	return outboundRegisterModeAuto
+}
+
+func normalizeOutboundRegisterMode(v uint64) outboundRegisterMode {
+	switch outboundRegisterMode(v) {
+	case outboundRegisterModeDisabled, outboundRegisterModeRequired:
+		return outboundRegisterMode(v)
+	default:
+		return outboundRegisterModeAuto
+	}
 }
 
 type ClientOption func(c *Client)
@@ -95,14 +150,15 @@ func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats
 		log = logger.GetLogger()
 	}
 	c := &Client{
-		conf:         conf,
-		log:          log,
-		region:       region,
-		mon:          mon,
-		getIOClient:  getIOClient,
-		getSipClient: DefaultGetSipClientFunc,
-		getRoom:      DefaultGetRoomFunc,
-		activeCalls:  make(map[LocalTag]*outboundCall),
+		conf:                conf,
+		log:                 log,
+		region:              region,
+		mon:                 mon,
+		getIOClient:         getIOClient,
+		registrationManager: NewRegistrationManager(),
+		getSipClient:        DefaultGetSipClientFunc,
+		getRoom:             DefaultGetRoomFunc,
+		activeCalls:         make(map[LocalTag]*outboundCall),
 	}
 	for _, option := range options {
 		option(c)
@@ -224,6 +280,7 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 		"toHost", req.Address,
 		"toUser", req.CallTo,
 		"direction", "outbound",
+		"registerMode", outboundRegisterModeFromRequest(req).String(),
 	)
 
 	req.ParticipantAttributes = maps.Clone(req.ParticipantAttributes) // shallow clone - string/string map. Needed to avoid mutating psrpc req
@@ -274,6 +331,7 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 		featureFlags:    req.FeatureFlags,
 		mediaConfig:     mconf,
 		displayName:     req.DisplayName,
+		registerMode:    outboundRegisterModeFromRequest(req),
 	}
 	log.Infow("Creating SIP participant")
 	call, err := c.newCall(ctx, tid, c.conf, log, LocalTag(req.SipCallId), roomConf, sipConf, state, req.ProjectId)
