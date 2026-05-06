@@ -20,6 +20,7 @@ import (
 const (
 	defaultRegisterExpiration = 300 * time.Second
 	defaultRegisterRefresh    = 30 * time.Second
+	minRegisterExpiration     = 15 * time.Second
 	freshRegisterInviteRetry  = 5 * time.Second
 	registrationIdleTimeout   = 10 * time.Minute
 	registerRefreshBackoffMin = 5 * time.Second
@@ -491,22 +492,28 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 }
 
 func registrationExpires(resp *sip.Response, fallback time.Duration) time.Duration {
+	normalize := func(v time.Duration) time.Duration {
+		if v < minRegisterExpiration {
+			return minRegisterExpiration
+		}
+		return v
+	}
 	if resp == nil {
-		return fallback
+		return normalize(fallback)
 	}
 	if contact := resp.Contact(); contact != nil {
 		if raw, ok := headerParam(contact.Params, "expires"); ok {
 			if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
-				return time.Duration(seconds) * time.Second
+				return normalize(time.Duration(seconds) * time.Second)
 			}
 		}
 	}
 	if header := resp.GetHeader("Expires"); header != nil {
 		if seconds, err := strconv.Atoi(strings.TrimSpace(header.Value())); err == nil && seconds >= 0 {
-			return time.Duration(seconds) * time.Second
+			return normalize(time.Duration(seconds) * time.Second)
 		}
 	}
-	return fallback
+	return normalize(fallback)
 }
 
 func headerParam(params sip.HeaderParams, name string) (string, bool) {

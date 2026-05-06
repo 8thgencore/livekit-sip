@@ -3,6 +3,7 @@ package sip
 import (
 	"context"
 	"encoding/json"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,12 @@ import (
 )
 
 const inboundRegisterSyncInterval = 5 * time.Second
+const inboundRegisterEnsureInterval = 2 * time.Minute
+
+type inboundRegisterSyncState struct {
+	fingerprint string
+	nextEnsure  time.Time
+}
 
 type inboundTrunkMetadata struct {
 	SIPEndpoint *struct {
@@ -47,9 +54,10 @@ func (s *Service) startInboundRegisterSync() {
 	s.mu.Unlock()
 
 	sipClient := lksdk.NewSIPClient(s.conf.WsUrl, s.conf.ApiKey, s.conf.ApiSecret)
+	states := make(map[string]inboundRegisterSyncState)
 
 	go func() {
-		s.syncInboundTrunksForRegister(ctx, sipClient)
+		s.syncInboundTrunksForRegister(ctx, sipClient, states)
 		ticker := time.NewTicker(inboundRegisterSyncInterval)
 		defer ticker.Stop()
 		for {
@@ -57,24 +65,59 @@ func (s *Service) startInboundRegisterSync() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.syncInboundTrunksForRegister(ctx, sipClient)
+				s.syncInboundTrunksForRegister(ctx, sipClient, states)
 			}
 		}
 	}()
 }
 
-func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *lksdk.SIPClient) {
+func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *lksdk.SIPClient, states map[string]inboundRegisterSyncState) {
 	resp, err := sipClient.ListSIPInboundTrunk(ctx, &livekit.ListSIPInboundTrunkRequest{})
 	if err != nil {
 		s.log.Warnw("failed to list inbound trunks for REGISTER sync", err)
 		return
 	}
+
+	now := time.Now()
+	nextTickAt := now.Add(inboundRegisterSyncInterval)
+	active := make(map[string]struct{}, len(resp.GetItems()))
 	for _, trunk := range resp.GetItems() {
 		if trunk == nil {
 			continue
 		}
+		id := trunk.GetSipTrunkId()
+		if id == "" {
+			continue
+		}
+		active[id] = struct{}{}
+
+		fingerprint := trunk.GetMetadata() + "|" + trunk.GetAuthUsername() + "|" + trunk.GetAuthPassword()
+		st := states[id]
+		changed := st.fingerprint != fingerprint
+		// Refresh proactively: if the trunk would become due by the next sync tick,
+		// run ensure now instead of waiting until it is already overdue.
+		if !changed && nextTickAt.Before(st.nextEnsure) {
+			continue
+		}
 		s.registerInboundTrunkFromMetadata(ctx, trunk)
+		states[id] = inboundRegisterSyncState{
+			fingerprint: fingerprint,
+			nextEnsure:  now.Add(inboundRegisterEnsureInterval + inboundRegisterJitter(id)),
+		}
 	}
+
+	for id := range states {
+		if _, ok := active[id]; !ok {
+			delete(states, id)
+		}
+	}
+}
+
+func inboundRegisterJitter(trunkID string) time.Duration {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(trunkID))
+	// 0..29s deterministic jitter to spread periodic ensure across trunks.
+	return time.Duration(h.Sum32()%30) * time.Second
 }
 
 func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *livekit.SIPInboundTrunkInfo) {
