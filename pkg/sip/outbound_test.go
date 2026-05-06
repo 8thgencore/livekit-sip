@@ -541,7 +541,7 @@ func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteAutoRegistersForNovofon(t *testing.T) {
+func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
@@ -559,9 +559,9 @@ func TestOutboundInviteAutoRegistersForNovofon(t *testing.T) {
 		done <- err
 	}()
 
-	registerTx := waitTransaction(t, sipClient)
-	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 	require.Error(t, <-done)
 }
 
