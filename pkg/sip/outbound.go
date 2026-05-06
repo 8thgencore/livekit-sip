@@ -67,7 +67,7 @@ type sipOutboundConfig struct {
 	maxCallDuration time.Duration
 	enabledFeatures []livekit.SIPFeature
 	featureFlags    map[string]string
-	mediaEncryption sdp.Encryption
+	mediaConfig     *sipMediaConfig
 	displayName     *string
 	registerMode    outboundRegisterMode
 }
@@ -728,7 +728,8 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		cancel()
 	}()
 
-	sdpOffer, err := c.media.NewOffer(c.sipConf.mediaEncryption)
+	mconf := c.sipConf.mediaConfig
+	sdpOffer, err := c.media.NewOffer(mconf.Codecs, mconf.Encryption)
 	if err != nil {
 		return err
 	}
@@ -811,7 +812,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 
 	c.log = LoggerWithHeaders(c.log, c.cc)
 
-	mc, localSDP, err := c.media.SetAnswer(sdpOffer, sdpResp, c.sipConf.mediaEncryption)
+	mc, localSDP, err := c.media.SetAnswer(sdpOffer, sdpResp, mconf.Codecs, mconf.Encryption)
 	if err != nil {
 		return err
 	}

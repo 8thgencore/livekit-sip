@@ -161,7 +161,7 @@ func testInvite(t *testing.T, h Handler, hidden bool, from, to string, test func
 	sipClient, err := sipgo.NewClient(sipUserAgent)
 	require.NoError(t, err)
 
-	offer, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	offer, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0B, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData, err := offer.SDP.Marshal()
 	require.NoError(t, err)
@@ -420,12 +420,12 @@ func TestDigestAuthSimultaneousCalls(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create SDP offers
-	offer1, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	offer1, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0B, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData1, err := offer1.SDP.Marshal()
 	require.NoError(t, err)
 
-	offer2, err := sdp.NewOffer(localIP, 0xB0C, sdp.EncryptionNone)
+	offer2, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0C, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData2, err := offer2.SDP.Marshal()
 	require.NoError(t, err)
@@ -614,7 +614,7 @@ func TestDigestAuthStandardFlow(t *testing.T) {
 	sipClient, err := sipgo.NewClient(sipUserAgent)
 	require.NoError(t, err)
 
-	offer, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	offer, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0B, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData, err := offer.SDP.Marshal()
 	require.NoError(t, err)
@@ -869,7 +869,7 @@ func TestCANCELSendsBothResponses(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create SDP offer
-	offer, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	offer, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0B, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData, err := offer.SDP.Marshal()
 	require.NoError(t, err)
@@ -1036,7 +1036,7 @@ func TestSameCallIDForAuthFlow(t *testing.T) {
 	sipClient, err := sipgo.NewClient(sipUserAgent)
 	require.NoError(t, err)
 
-	offer, err := sdp.NewOffer(localIP, 0xB0B, sdp.EncryptionNone)
+	offer, err := sdp.NewOfferWith(defaultCodecs, localIP, 0xB0B, sdp.EncryptionNone)
 	require.NoError(t, err)
 	offerData, err := offer.SDP.Marshal()
 	require.NoError(t, err)

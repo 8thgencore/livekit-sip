@@ -110,7 +110,7 @@ type CallDispatch struct {
 	FeatureFlags        map[string]string
 	RingingTimeout      time.Duration
 	MaxCallDuration     time.Duration
-	MediaEncryption     livekit.SIPMediaEncryption
+	MediaConfig         *livekit.SIPMediaConfig
 }
 
 type CallIdentifier struct {

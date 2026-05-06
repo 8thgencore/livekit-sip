@@ -654,6 +654,7 @@ type inboundCall struct {
 	cancel      func()
 	closeReason atomic.Pointer[ReasonHeader]
 	call        *rpc.SIPCall
+	mmu         sync.Mutex
 	media       *MediaPort
 	dtmf        chan dtmf.Event // buffered
 	lkRoom      RoomInterface   // LiveKit room; only active after correct pin is entered
@@ -761,6 +762,9 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 		NoPin:   false,
 	})
 	tdisp()
+	if disp.MediaConfig == nil {
+		disp.MediaConfig = &livekit.SIPMediaConfig{}
+	}
 	if disp.ProjectID != "" {
 		c.appendLogValues("projectID", disp.ProjectID)
 		c.projectID = disp.ProjectID
@@ -777,7 +781,7 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 		info.RoomName = disp.Room.RoomName
 		info.ParticipantIdentity = disp.Room.Participant.Identity
 		info.ParticipantAttributes = disp.Room.Participant.Attributes
-		info.MediaEncryption = disp.MediaEncryption.String()
+		info.MediaEncryption = disp.MediaConfig.GetEncryption().String()
 		info.EnabledFeatures = disp.EnabledFeatures
 		// Set callidfull in participant attributes for backwards compatibility
 		if c.call.SipCallId != "" {
@@ -817,7 +821,7 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 		pinPrompt = true
 	}
 
-	runMedia := func(enc livekit.SIPMediaEncryption) ([]byte, error) {
+	runMedia := func(m *livekit.SIPMediaConfig) ([]byte, error) {
 		log := c.log()
 		if h := req.ContentLength(); h != nil {
 			log = log.WithValues("contentLength", int(*h))
@@ -834,7 +838,7 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 		}
 		rawSDP := req.Body()
 		tmedia := c.mon.StageDurTimer("start-media")
-		answerData, err := c.runMediaConn(tid, rawSDP, enc, conf, disp.EnabledFeatures, disp.FeatureFlags)
+		answerData, err := c.runMediaConn(tid, rawSDP, m, conf, disp.EnabledFeatures, disp.FeatureFlags)
 		tmedia()
 		if err != nil {
 			sipReason := sip.StatusInternalServerError
@@ -912,7 +916,7 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 		// Accept the call first on the SIP side, so that we can send audio prompts.
 		// This also means we have to pick encryption setting early, before room is selected.
 		// Backend must explicitly enable encryption for pin prompts.
-		answerData, err = runMedia(disp.MediaEncryption)
+		answerData, err = runMedia(disp.MediaConfig)
 		if err != nil {
 			return err // already sent a response
 		}
@@ -926,7 +930,7 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 	} else {
 		// Start media with given encryption settings.
 		var err error
-		answerData, err = runMedia(disp.MediaEncryption)
+		answerData, err = runMedia(disp.MediaConfig)
 		if err != nil {
 			return err // already sent a response
 		}
@@ -1026,12 +1030,14 @@ func (c *inboundCall) waitForCallEnd(ctx context.Context, ackReceived <-chan str
 	}
 }
 
-func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, enc livekit.SIPMediaEncryption, conf *config.Config, features []livekit.SIPFeature, featureFlags map[string]string) (answerData []byte, _ error) {
+func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, m *livekit.SIPMediaConfig, conf *config.Config, features []livekit.SIPFeature, featureFlags map[string]string) (answerData []byte, _ error) {
+	c.mmu.Lock()
+	defer c.mmu.Unlock()
 	c.mon.SDPSize(len(offerData), true)
 	c.log().Debugw("SDP offer", "sdp", string(offerData))
-	e, err := sdpEncryption(enc)
+	mconf, err := newMediaConfig(m)
 	if err != nil {
-		c.log().Errorw("Cannot parse encryption", err)
+		c.log().Errorw("Cannot create media config", err)
 		return nil, err
 	}
 
@@ -1053,11 +1059,11 @@ func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, enc livekit
 		return nil, err
 	}
 	c.media = mp
-	c.media.EnableTimeout(false) // enabled once we accept the call
-	c.media.DisableOut()         // disabled until we send 200
-	c.media.SetDTMFAudio(conf.AudioDTMF)
+	mp.EnableTimeout(false) // enabled once we accept the call
+	mp.DisableOut()         // disabled until we send 200
+	mp.SetDTMFAudio(conf.AudioDTMF)
 
-	answer, mconf, err := mp.SetOffer(offerData, e)
+	answer, mc, err := mp.SetOffer(offerData, mconf.Codecs, mconf.Encryption)
 	if err != nil {
 		return nil, err
 	}
@@ -1068,23 +1074,23 @@ func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, enc livekit
 	c.mon.SDPSize(len(answerData), false)
 	c.log().Debugw("SDP answer", "sdp", string(answerData))
 
-	if err = c.media.SetConfig(mconf); err != nil {
+	if err = mp.SetConfig(mc); err != nil {
 		return nil, err
 	}
-	mconf.Processor = c.s.handler.GetMediaProcessor(features, featureFlags, string(c.cc.ID()), MediaProcessorOpts{InputSampleRate: c.media.InputSampleRate()})
-	if mconf.Audio.DTMFType != 0 {
-		c.media.HandleDTMF(c.handleDTMF)
+	mc.Processor = c.s.handler.GetMediaProcessor(features, featureFlags, string(c.cc.ID()), MediaProcessorOpts{InputSampleRate: c.media.InputSampleRate()})
+	if mc.Audio.DTMFType != 0 {
+		mp.HandleDTMF(c.handleDTMF)
 	}
 
 	// Must be set earlier to send the pin prompts.
-	if w := c.lkRoom.SwapOutput(c.media.GetAudioWriter()); w != nil {
+	if w := c.lkRoom.SwapOutput(mp.GetAudioWriter()); w != nil {
 		_ = w.Close()
 	}
-	if mconf.Audio.DTMFType != 0 {
-		c.lkRoom.SetDTMFOutput(c.media)
+	if mc.Audio.DTMFType != 0 {
+		c.lkRoom.SetDTMFOutput(mp)
 	}
 	c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
-		info.AudioCodec = mconf.Audio.Codec.Info().SDPName
+		info.AudioCodec = mc.Audio.Codec.Info().SDPName
 	})
 	return answerData, nil
 }
@@ -1360,6 +1366,8 @@ func (c *inboundCall) Shutdown(ctx context.Context) {
 
 func (c *inboundCall) closeMedia() {
 	c.lkRoom.Close()
+	c.mmu.Lock()
+	defer c.mmu.Unlock()
 	if c.media != nil {
 		c.media.Close()
 	}
