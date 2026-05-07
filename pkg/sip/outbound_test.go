@@ -68,6 +68,34 @@ func sendProxyAuthRequired(t *testing.T, tx *transactionRequest) {
 	require.NoError(t, tx.transaction.SendResponse(resp))
 }
 
+func TestOutboundProviderProfileResolution(t *testing.T) {
+	novofon := outboundProviderProfileForAddress("SIP.NOVOFON.RU:5060")
+	require.Equal(t, "novofon", novofon.ID)
+	require.True(t, novofon.SkipRegistrationInAuto)
+	require.True(t, novofon.DirectAuthFailureIsConfigError)
+
+	novofonSubdomain := outboundProviderProfileForAddress("proxy.sip.novofon.ru:5060")
+	require.Equal(t, "novofon", novofonSubdomain.ID)
+	require.True(t, novofonSubdomain.SkipRegistrationInAuto)
+
+	uiscom := outboundProviderProfileForAddress("pbx.uiscom.ru.")
+	require.Equal(t, "uiscom", uiscom.ID)
+	require.False(t, uiscom.SkipRegistrationInAuto)
+	require.False(t, uiscom.AllowRegisteredInviteDirectFallback)
+
+	mtt := outboundProviderProfileForAddress("mtt.ru:5060")
+	require.Equal(t, "mtt", mtt.ID)
+	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
+
+	unknown := outboundProviderProfileForAddress("sip.unknown.example:5060")
+	require.Equal(t, "universal", unknown.ID)
+	require.False(t, unknown.SkipRegistrationInAuto)
+	require.True(t, unknown.AllowRegisteredInviteDirectFallback)
+
+	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
+	require.Equal(t, "universal", nearMiss.ID)
+}
+
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	const (
 		mockRegisteredUser = "5550101"
@@ -161,6 +189,41 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
 
 	require.Error(t, <-done)
+}
+
+func TestOutboundInviteProviderCanDisableDirectFallbackAfterRegisteredBusyHere(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "pbx.uiscom.ru:5060"
+	req.Hostname = ""
+	req.Username = "0526470"
+	req.Password = "test-password"
+	req.Number = "0526470"
+	req.CallTo = "+77057756019"
+	req.WaitUntilAnswered = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+	registeredInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
+	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	require.Error(t, <-done)
+
+	select {
+	case retryTx := <-sipClient.transactions:
+		t.Cleanup(func() { retryTx.transaction.Terminate() })
+		t.Fatalf("unexpected direct fallback transaction: %s", retryTx.req.Method)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *testing.T) {
@@ -385,12 +448,9 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
-	const skipRegisterHost = "sip.no-register.example"
-	outboundRegisterSkipHosts[skipRegisterHost] = struct{}{}
-	t.Cleanup(func() { delete(outboundRegisterSkipHosts, skipRegisterHost) })
 
 	req := MinimalCreateSIPParticipantRequest()
-	req.Address = skipRegisterHost + ":5060"
+	req.Address = "proxy.sip.novofon.ru:5060"
 	req.Hostname = ""
 	req.Username = "5550104"
 	req.Password = "test-password"
@@ -437,12 +497,9 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRetries(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
-	const skipRegisterHost = "sip.no-register.example"
-	outboundRegisterSkipHosts[skipRegisterHost] = struct{}{}
-	t.Cleanup(func() { delete(outboundRegisterSkipHosts, skipRegisterHost) })
 
 	req := MinimalCreateSIPParticipantRequest()
-	req.Address = skipRegisterHost + ":5060"
+	req.Address = "proxy.sip.novofon.ru:5060"
 	req.Hostname = ""
 	req.Username = "0101536"
 	req.Password = "test-password"
@@ -506,6 +563,62 @@ func TestOutboundInviteRequiresRegisterWhenConfigured(t *testing.T) {
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
 	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteRequiredOverridesProviderProfileSkipRegister(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.novofon.ru:5060"
+	req.Hostname = ""
+	req.Username = "0101536"
+	req.Password = "test-password"
+	req.Number = "0101536"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeRequired)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	require.Error(t, <-done)
+}
+
+func TestOutboundInviteAutoFallsBackToDirectInviteAfterUniversalRegisterFailure(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "sip.universal.example:5060"
+	req.Hostname = ""
+	req.Username = "5550106"
+	req.Password = "test-password"
+	req.Number = "5550106"
+	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(context.Background(), req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+
+	inviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	require.NotNil(t, inviteTx.req.From())
+	require.Equal(t, client.sconf.SignalingIP.String(), inviteTx.req.From().Address.Host)
+	require.NotNil(t, inviteTx.req.Contact())
+	require.Empty(t, inviteTx.req.Contact().Address.User)
+	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
 	require.Error(t, <-done)
 }
 

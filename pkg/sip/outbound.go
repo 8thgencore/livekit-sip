@@ -76,15 +76,6 @@ const (
 	inviteRetryAfterFreshRegisterDelay = 2 * time.Second
 )
 
-var outboundRegisterSkipHosts = map[string]struct{}{
-	"novofon.ru":     {},
-	"sip.novofon.ru": {},
-}
-
-var outboundRegistrationRequiredHosts = map[string]struct{}{
-	"pbx.uiscom.ru": {},
-}
-
 type providerAuthConfigError struct {
 	address  string
 	fromUser string
@@ -121,34 +112,6 @@ type outboundCall struct {
 	sipConf  sipOutboundConfig
 }
 
-func shouldSkipRegistrationForAddress(address string) bool {
-	host := normalizeSIPHost(address)
-	_, ok := outboundRegisterSkipHosts[host]
-	return ok
-}
-
-func requiresRegistrationForAddress(address string) bool {
-	host := normalizeSIPHost(address)
-	_, ok := outboundRegistrationRequiredHosts[host]
-	return ok
-}
-
-func usesRegisterSkippedIPTrunk(sipConf sipOutboundConfig) bool {
-	if !shouldSkipRegistrationForAddress(sipConf.address) {
-		return false
-	}
-	return sipConf.registerMode == outboundRegisterModeDisabled ||
-		sipConf.registerMode == outboundRegisterModeAuto
-}
-
-func normalizeSIPHost(address string) string {
-	host := address
-	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
-		host = parsedHost
-	}
-	return strings.ToLower(strings.TrimSuffix(host, "."))
-}
-
 func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Config, log logger.Logger, id LocalTag, room RoomConfig, sipConf sipOutboundConfig, state *CallState, projectID string) (*outboundCall, error) {
 	signalLoggingEnabled, _ := strconv.ParseBool(sipConf.featureFlags[signalLoggingFeatureFlag])
 	if sipConf.maxCallDuration <= 0 || sipConf.maxCallDuration > maxCallDuration {
@@ -167,6 +130,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	if sipConf.host == "" {
 		sipConf.host = contact.GetHost()
 	}
+	providerProfile := outboundProviderProfileForAddress(sipConf.address)
 	directContact := contact
 	directFrom := URI{
 		User:      sipConf.from,
@@ -175,7 +139,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		Transport: tr,
 	}
 	var regProfile *ResolvedRegistrationConfig
-	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto && shouldSkipRegistrationForAddress(sipConf.address)) {
+	if sipConf.registerMode != outboundRegisterModeDisabled && !(sipConf.registerMode == outboundRegisterModeAuto && providerProfile.SkipRegistrationInAuto) {
 		var err error
 		regSipConf := sipConf
 		regSipConf.host = defaultHost
@@ -193,6 +157,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 				"username", sipConf.user,
 				"registrar", regProfile.Registrar.GetDest(),
 			)
+			regProfile = nil
 		}
 	}
 	if regProfile != nil {
@@ -233,7 +198,8 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	call.stats.Update()
 	call.cc = c.newOutbound(log, id, fromURI, contact, sipConf.displayName, call.setAttrsToHeaders)
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
-	call.cc.registerSkippedIPTrunk = usesRegisterSkippedIPTrunk(sipConf)
+	call.cc.directProviderAuthConfigError = providerProfile.DirectAuthFailureIsConfigError &&
+		(sipConf.registerMode == outboundRegisterModeDisabled || sipConf.registerMode == outboundRegisterModeAuto)
 	if sipConf.featureFlags[outboundRouteHeadersFeatureFlag] == "true" {
 		call.cc.routeHeaders = conf.OutboundRouteHeaders
 	}
@@ -840,7 +806,7 @@ func (c *outboundCall) shouldRetryInviteWithoutRegistration(err error) bool {
 	if c == nil || c.regProfile == nil || c.sipConf.registerMode != outboundRegisterModeAuto {
 		return false
 	}
-	if requiresRegistrationForAddress(c.sipConf.address) {
+	if !outboundProviderProfileForAddress(c.sipConf.address).AllowRegisteredInviteDirectFallback {
 		return false
 	}
 	var sipErr *livekit.SIPStatus
@@ -951,13 +917,13 @@ func (c *Client) newOutbound(log logger.Logger, id LocalTag, from, contact URI, 
 }
 
 type sipOutbound struct {
-	log                    logger.Logger
-	c                      *Client
-	id                     LocalTag
-	from                   *sip.FromHeader
-	contact                *sip.ContactHeader
-	routeHeaders           []string
-	registerSkippedIPTrunk bool
+	log                           logger.Logger
+	c                             *Client
+	id                            LocalTag
+	from                          *sip.FromHeader
+	contact                       *sip.ContactHeader
+	routeHeaders                  []string
+	directProviderAuthConfigError bool
 
 	mu         sync.RWMutex
 	tag        RemoteTag
@@ -1109,7 +1075,7 @@ func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *Resolved
 authLoop:
 	for try := 0; ; try++ {
 		if try >= inviteAuthMaxAttempts {
-			if c.registerSkippedIPTrunk && lastAuthStatus != 0 {
+			if c.directProviderAuthConfigError && lastAuthStatus != 0 {
 				return nil, psrpc.NewError(psrpc.FailedPrecondition, providerAuthConfigError{
 					address:  lastAuthAddress,
 					fromUser: lastAuthFromUser,

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -45,13 +46,26 @@ import (
 type sipServiceStopFunc func()
 type sipServiceActiveCallsFunc func() sip.ActiveCalls
 
+type sipTrunkClient interface {
+	DeleteSIPTrunk(ctx context.Context, in *livekit.DeleteSIPTrunkRequest) (*livekit.SIPTrunkInfo, error)
+	GetSIPInboundTrunksByIDs(ctx context.Context, ids []string) ([]*livekit.SIPInboundTrunkInfo, error)
+}
+
+var outboundTrunkAuthFailureErrors = []string{
+	"max auth retry attempts reached for SIP register",
+	"max auth retry attempts reached for SIP invite",
+	"SIP IP trunk rejected INVITE auth with status 407",
+	"sip status: 403",
+	"status=403",
+}
+
 type Service struct {
 	conf *config.Config
 	log  logger.Logger
 
 	psrpcServer rpc.SIPInternalServerImpl
 	psrpcClient rpc.IOInfoClient
-	sipClient   *lksdk.SIPClient
+	sipClient   sipTrunkClient
 	bus         psrpc.MessageBus
 
 	promServer   *http.Server
@@ -268,5 +282,50 @@ func (s *Service) OnInboundInfo(log logger.Logger, callInfo *rpc.SIPCall, header
 }
 
 func (s *Service) OnSessionEnd(ctx context.Context, callIdentifier *sip.CallIdentifier, callInfo *livekit.SIPCallInfo, reason string) {
-	s.log.Infow("SIP call ended", "callID", callInfo.CallId, "reason", reason)
+	callID := ""
+	if callInfo != nil {
+		callID = callInfo.GetCallId()
+	}
+	s.log.Infow("SIP call ended", "callID", callID, "reason", reason)
+	if s.sipClient == nil || callInfo == nil {
+		return
+	}
+	if callInfo.GetCallDirection() != livekit.SIPCallDirection_SCD_OUTBOUND || callInfo.GetTrunkId() == "" {
+		return
+	}
+	if !isOutboundTrunkAuthFailure(callInfo, reason) {
+		return
+	}
+	trunkID := callInfo.GetTrunkId()
+	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := s.sipClient.DeleteSIPTrunk(deleteCtx, &livekit.DeleteSIPTrunkRequest{SipTrunkId: trunkID}); err != nil {
+		s.log.Warnw("failed to delete outbound SIP trunk after auth failure", err,
+			"sipTrunk", trunkID,
+			"callID", callID,
+			"reason", reason,
+		)
+		return
+	}
+	s.log.Infow("deleted outbound SIP trunk after auth failure",
+		"sipTrunk", trunkID,
+		"callID", callID,
+		"reason", reason,
+	)
+}
+
+func isOutboundTrunkAuthFailure(callInfo *livekit.SIPCallInfo, reason string) bool {
+	if reason == "provider-auth" {
+		return true
+	}
+	if callInfo.GetCallStatusCode().GetCode() == livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN {
+		return true
+	}
+	errText := callInfo.GetError()
+	for _, authFailure := range outboundTrunkAuthFailureErrors {
+		if strings.Contains(errText, authFailure) {
+			return true
+		}
+	}
+	return false
 }
