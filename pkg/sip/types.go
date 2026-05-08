@@ -148,6 +148,14 @@ func normalizeRepeatedSIPPort(value string) string {
 	return host + ":" + port
 }
 
+func normalizeSIPHostname(value string) string {
+	value = normalizeRepeatedSIPPort(value)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return host
+	}
+	return value
+}
+
 func (u URI) GetHost() string {
 	host := u.Host
 	if host == "" {

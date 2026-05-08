@@ -236,6 +236,8 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 		return nil, siperrors.ErrUnavailable
 	}
 	req.Upgrade()
+	req.Address = normalizeRepeatedSIPPort(req.Address)
+	req.Hostname = normalizeSIPHostname(req.Hostname)
 	if req.CallTo == "" {
 		return nil, psrpc.NewErrorf(psrpc.InvalidArgument, "call-to number must be set")
 	} else if req.Address == "" {

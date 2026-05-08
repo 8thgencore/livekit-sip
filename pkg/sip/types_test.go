@@ -33,3 +33,22 @@ func TestCreateURIFromUserAndAddressNormalizesRepeatedPort(t *testing.T) {
 	require.Equal(t, 5060, uri.GetPort())
 	require.Equal(t, "pbx.uiscom.ru:5060", uri.GetDest())
 }
+
+func TestNormalizeSIPHostname(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "plain host", input: "pbx.uiscom.ru", want: "pbx.uiscom.ru"},
+		{name: "host with port", input: "pbx.uiscom.ru:5060", want: "pbx.uiscom.ru"},
+		{name: "host with repeated port", input: "pbx.uiscom.ru:5060:5060", want: "pbx.uiscom.ru"},
+		{name: "different ports stay unchanged", input: "pbx.uiscom.ru:5060:5070", want: "pbx.uiscom.ru:5060:5070"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, normalizeSIPHostname(tt.input))
+		})
+	}
+}
