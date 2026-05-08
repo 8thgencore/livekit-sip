@@ -97,7 +97,7 @@ func ConvertURI(u *sip.Uri) URI {
 func CreateURIFromUserAndAddress(user string, address string, transport Transport) URI {
 	uri := URI{
 		User:      user,
-		Host:      address,
+		Host:      normalizeRepeatedSIPPort(address),
 		Transport: transport,
 	}
 
@@ -107,6 +107,7 @@ func CreateURIFromUserAndAddress(user string, address string, transport Transpor
 }
 
 func (u URI) Normalize() URI {
+	u.Host = normalizeRepeatedSIPPort(u.Host)
 	if addr, sport, err := net.SplitHostPort(u.Host); err == nil {
 		if port, err := strconv.Atoi(sport); err == nil {
 			u.Host = addr
@@ -114,6 +115,37 @@ func (u URI) Normalize() URI {
 		}
 	}
 	return u
+}
+
+func normalizeRepeatedSIPPort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "[") {
+		return value
+	}
+
+	parts := strings.Split(value, ":")
+	if len(parts) <= 2 {
+		return value
+	}
+
+	host := parts[0]
+	if host == "" {
+		return value
+	}
+
+	port := parts[1]
+	if port == "" {
+		return value
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return value
+	}
+	for _, p := range parts[2:] {
+		if p != port {
+			return value
+		}
+	}
+	return host + ":" + port
 }
 
 func (u URI) GetHost() string {

@@ -28,11 +28,13 @@ import (
 // the LiveKit room closing. The reason comes from lksdk's
 // OnDisconnectedWithReason callback. Clean leaves (customer ended the call
 // or removed the participant) count as success; connection failures and
-// unknown causes count as server_error.
+// room lifecycle failures count as server_error.
 func terminationFromRoomDisconnect(reason lksdk.DisconnectionReason) stats.Termination {
 	switch reason {
-	case lksdk.LeaveRequested, lksdk.RoomClosed, lksdk.ParticipantRemoved:
+	case lksdk.LeaveRequested, lksdk.ParticipantRemoved:
 		return stats.Success("removed")
+	case lksdk.RoomClosed, lksdk.OtherReason:
+		return stats.ServerError("lk-room-ended")
 	case lksdk.Failed:
 		return stats.ServerError("room-failed")
 	default:
@@ -40,7 +42,7 @@ func terminationFromRoomDisconnect(reason lksdk.DisconnectionReason) stats.Termi
 		// or empty (no reason reported by SDK). Conservative default —
 		// surface as server_error so the SLI doesn't silently absorb LK-side
 		// issues.
-		return stats.ServerError("room-disconnected")
+		return stats.ServerError("lk-room-ended")
 	}
 }
 

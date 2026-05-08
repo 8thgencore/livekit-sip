@@ -55,8 +55,7 @@ var outboundTrunkAuthFailureErrors = []string{
 	"max auth retry attempts reached for SIP register",
 	"max auth retry attempts reached for SIP invite",
 	"SIP IP trunk rejected INVITE auth with status 407",
-	"sip status: 403",
-	"status=403",
+	"unexpected status from INVITE response: sip status: 603: Declined",
 }
 
 type Service struct {
@@ -316,9 +315,6 @@ func (s *Service) OnSessionEnd(ctx context.Context, callIdentifier *sip.CallIden
 
 func isOutboundTrunkAuthFailure(callInfo *livekit.SIPCallInfo, reason string) bool {
 	if reason == "provider-auth" {
-		return true
-	}
-	if callInfo.GetCallStatusCode().GetCode() == livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN {
 		return true
 	}
 	errText := callInfo.GetError()
