@@ -87,6 +87,11 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.Equal(t, "mtt", mtt.ID)
 	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
 
+	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
+	require.Equal(t, "sipuni", sipuni.ID)
+	require.True(t, sipuni.SkipRegistrationInAuto)
+	require.False(t, sipuni.AllowRegisteredInviteDirectFallback)
+
 	unknown := outboundProviderProfileForAddress("sip.unknown.example:5060")
 	require.Equal(t, "universal", unknown.ID)
 	require.False(t, unknown.SkipRegistrationInAuto)

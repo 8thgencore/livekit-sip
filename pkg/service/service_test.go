@@ -53,18 +53,6 @@ func TestOnSessionEndDeletesOutboundTrunkForAuthFailures(t *testing.T) {
 				"SIP IP trunk rejected INVITE auth with status 407 for address \"sip.novofon.ru\" and from user \"0101536\"",
 			),
 		},
-		{
-			name: "declined invite error text",
-			callInfo: outboundCallInfoWithError(
-				"unexpected status from INVITE response: sip status: 603: Declined",
-			),
-		},
-		{
-			name: "permission denied wrapper with declined sip status",
-			callInfo: outboundCallInfoWithError(
-				"SIP dial failed: TwirpError(code=permission_denied, message=twirp error unknown: unexpected status from INVITE response: sip status: 603: Declined, status=403, metadata={'sip_status_code': '603'})",
-			),
-		},
 	}
 
 	for _, tt := range tests {
@@ -90,6 +78,8 @@ func TestOnSessionEndDoesNotDeleteOutboundTrunkForNormalFailures(t *testing.T) {
 		{name: "request terminated", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_REQUEST_TERMINATED)},
 		{name: "temporarily unavailable", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_TEMPORARILY_UNAVAILABLE)},
 		{name: "declined", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_GLOBAL_DECLINE)},
+		{name: "declined invite error text", callInfo: outboundCallInfoWithError("unexpected status from INVITE response: sip status: 603: Declined")},
+		{name: "permission denied wrapper with declined sip status", callInfo: outboundCallInfoWithError("SIP dial failed: TwirpError(code=permission_denied, message=twirp error unknown: unexpected status from INVITE response: sip status: 603: Declined, status=403, metadata={'sip_status_code': '603'})")},
 		{name: "forbidden status", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN)},
 		{name: "forbidden error text", callInfo: outboundCallInfoWithError("unexpected status from INVITE response: sip status: 403: Forbidden")},
 		{name: "inbound auth loop", callInfo: inboundCallInfoWithError("max auth retry attempts reached for SIP invite")},

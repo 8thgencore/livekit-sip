@@ -35,8 +35,8 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		AllowRegisteredInviteDirectFallback: true,
 	},
 	"sipuni.ru": {
-		ID:                                  "sipuni",
-		AllowRegisteredInviteDirectFallback: true,
+		ID:                     "sipuni",
+		SkipRegistrationInAuto: true,
 	},
 }
 

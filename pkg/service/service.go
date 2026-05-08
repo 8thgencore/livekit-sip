@@ -55,7 +55,6 @@ var outboundTrunkAuthFailureErrors = []string{
 	"max auth retry attempts reached for SIP register",
 	"max auth retry attempts reached for SIP invite",
 	"SIP IP trunk rejected INVITE auth with status 407",
-	"unexpected status from INVITE response: sip status: 603: Declined",
 }
 
 type Service struct {
