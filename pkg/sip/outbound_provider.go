@@ -26,6 +26,7 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 	},
 	"uiscom.ru": {
 		ID: "uiscom",
+		AllowRegisteredInviteDirectFallback: true,
 	},
 	"mtt.ru": {
 		ID:                                  "mtt",
