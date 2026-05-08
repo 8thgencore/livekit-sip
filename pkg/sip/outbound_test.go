@@ -89,13 +89,16 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 
 	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
 	require.Equal(t, "sipuni", sipuni.ID)
-	require.True(t, sipuni.SkipRegistrationInAuto)
-	require.False(t, sipuni.AllowRegisteredInviteDirectFallback)
+	require.False(t, sipuni.SkipRegistrationInAuto)
+	require.True(t, sipuni.AllowRegisteredInviteDirectFallback)
+	require.True(t, sipuni.DeleteTrunkAfterCall)
+	require.True(t, ShouldDeleteOutboundTrunkAfterCall("voip.sipuni.ru:5060"))
 
 	unknown := outboundProviderProfileForAddress("sip.unknown.example:5060")
 	require.Equal(t, "universal", unknown.ID)
 	require.False(t, unknown.SkipRegistrationInAuto)
 	require.True(t, unknown.AllowRegisteredInviteDirectFallback)
+	require.False(t, unknown.DeleteTrunkAfterCall)
 
 	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
 	require.Equal(t, "universal", nearMiss.ID)

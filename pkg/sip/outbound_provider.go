@@ -10,6 +10,7 @@ type outboundProviderProfile struct {
 	SkipRegistrationInAuto              bool
 	AllowRegisteredInviteDirectFallback bool
 	DirectAuthFailureIsConfigError      bool
+	DeleteTrunkAfterCall                bool
 }
 
 var universalOutboundProviderProfile = outboundProviderProfile{
@@ -35,8 +36,9 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		AllowRegisteredInviteDirectFallback: true,
 	},
 	"sipuni.ru": {
-		ID:                     "sipuni",
-		SkipRegistrationInAuto: true,
+		ID:                                  "sipuni",
+		AllowRegisteredInviteDirectFallback: true,
+		DeleteTrunkAfterCall:                true,
 	},
 }
 
@@ -48,6 +50,10 @@ func outboundProviderProfileForAddress(address string) outboundProviderProfile {
 		}
 	}
 	return universalOutboundProviderProfile
+}
+
+func ShouldDeleteOutboundTrunkAfterCall(address string) bool {
+	return outboundProviderProfileForAddress(address).DeleteTrunkAfterCall
 }
 
 func normalizeSIPHost(address string) string {

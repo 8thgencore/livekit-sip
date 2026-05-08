@@ -291,24 +291,33 @@ func (s *Service) OnSessionEnd(ctx context.Context, callIdentifier *sip.CallIden
 	if callInfo.GetCallDirection() != livekit.SIPCallDirection_SCD_OUTBOUND || callInfo.GetTrunkId() == "" {
 		return
 	}
-	if !isOutboundTrunkAuthFailure(callInfo, reason) {
+	switch {
+	case isOutboundTrunkAuthFailure(callInfo, reason):
+		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "auth failure")
+	case sip.ShouldDeleteOutboundTrunkAfterCall(callInfo.GetToUri().GetHost()):
+		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "provider configured")
+	default:
 		return
 	}
-	trunkID := callInfo.GetTrunkId()
+}
+
+func (s *Service) deleteOutboundTrunk(ctx context.Context, callID, trunkID, reason, deleteReason string) {
 	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if _, err := s.sipClient.DeleteSIPTrunk(deleteCtx, &livekit.DeleteSIPTrunkRequest{SipTrunkId: trunkID}); err != nil {
-		s.log.Warnw("failed to delete outbound SIP trunk after auth failure", err,
+		s.log.Warnw("failed to delete outbound SIP trunk", err,
 			"sipTrunk", trunkID,
 			"callID", callID,
 			"reason", reason,
+			"deleteReason", deleteReason,
 		)
 		return
 	}
-	s.log.Infow("deleted outbound SIP trunk after auth failure",
+	s.log.Infow("deleted outbound SIP trunk",
 		"sipTrunk", trunkID,
 		"callID", callID,
 		"reason", reason,
+		"deleteReason", deleteReason,
 	)
 }
 

@@ -109,6 +109,24 @@ func TestOnSessionEndDoesNotDeleteWithoutSIPClient(t *testing.T) {
 	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoWithError("max auth retry attempts reached for SIP invite"), "invite-failed")
 }
 
+func TestOnSessionEndDeletesSipuniOutboundTrunk(t *testing.T) {
+	deleter := &fakeSIPTrunkClient{}
+	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
+
+	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoForHost("voip.sipuni.ru"), "bye")
+
+	require.Equal(t, []string{"ST_test"}, deleter.deleted)
+}
+
+func TestOnSessionEndDoesNotDeleteNonSipuniOutboundTrunk(t *testing.T) {
+	deleter := &fakeSIPTrunkClient{}
+	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
+
+	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoForHost("login.mtt.ru"), "bye")
+
+	require.Empty(t, deleter.deleted)
+}
+
 func outboundCallInfoWithError(errText string) *livekit.SIPCallInfo {
 	return &livekit.SIPCallInfo{
 		CallId:        "SCL_test",
@@ -130,5 +148,11 @@ func inboundCallInfoWithError(errText string) *livekit.SIPCallInfo {
 func outboundCallInfoWithStatus(status livekit.SIPStatusCode) *livekit.SIPCallInfo {
 	info := outboundCallInfoWithError("")
 	info.CallStatusCode = &livekit.SIPStatus{Code: status}
+	return info
+}
+
+func outboundCallInfoForHost(host string) *livekit.SIPCallInfo {
+	info := outboundCallInfoWithError("")
+	info.ToUri = &livekit.SIPUri{Host: host}
 	return info
 }
