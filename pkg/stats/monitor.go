@@ -80,6 +80,9 @@ type Monitor struct {
 	transfersSucceeded       *prometheus.CounterVec
 	transfersFailed          *prometheus.CounterVec
 	transfersActive          *prometheus.GaugeVec
+	trunkQueueLength         *prometheus.GaugeVec
+	trunkQueueActive         *prometheus.GaugeVec
+	trunkQueueRejected       *prometheus.CounterVec
 
 	cpu            *hwstats.CPUStats
 	maxUtilization float64
@@ -293,6 +296,30 @@ func (m *Monitor) Start(conf *config.Config) error {
 		Help:        "Number of currently active SIP transfers",
 		ConstLabels: prometheus.Labels{"node_id": conf.NodeID},
 	}, []string{"dir"}))
+
+	m.trunkQueueLength = mustRegister(m, prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace:   "livekit",
+		Subsystem:   "sip",
+		Name:        "outbound_trunk_queue_length",
+		Help:        "[trunk_queue] Number of queued outbound calls per trunk",
+		ConstLabels: prometheus.Labels{"node_id": conf.NodeID},
+	}, []string{"trunk"}))
+
+	m.trunkQueueActive = mustRegister(m, prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace:   "livekit",
+		Subsystem:   "sip",
+		Name:        "outbound_trunk_active_calls",
+		Help:        "[trunk_queue] Number of active outbound calls currently holding a trunk slot",
+		ConstLabels: prometheus.Labels{"node_id": conf.NodeID},
+	}, []string{"trunk"}))
+
+	m.trunkQueueRejected = mustRegister(m, prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace:   "livekit",
+		Subsystem:   "sip",
+		Name:        "outbound_trunk_queue_rejected_total",
+		Help:        "[trunk_queue] Total number of outbound calls rejected because the per-trunk queue was full",
+		ConstLabels: prometheus.Labels{"node_id": conf.NodeID},
+	}, []string{"trunk"}))
 
 	m.started.Break()
 
@@ -511,4 +538,25 @@ func (m *Monitor) TransferFailed(dir CallDir, reason string, changeActive bool) 
 	if changeActive {
 		m.transfersActive.WithLabelValues(dir.String()).Dec()
 	}
+}
+
+func (m *Monitor) TrunkQueueLength(trunk string, n int) {
+	if m == nil || m.trunkQueueLength == nil {
+		return
+	}
+	m.trunkQueueLength.WithLabelValues(trunk).Set(float64(n))
+}
+
+func (m *Monitor) TrunkQueueActive(trunk string, n int) {
+	if m == nil || m.trunkQueueActive == nil {
+		return
+	}
+	m.trunkQueueActive.WithLabelValues(trunk).Set(float64(n))
+}
+
+func (m *Monitor) TrunkQueueRejected(trunk string) {
+	if m == nil || m.trunkQueueRejected == nil {
+		return
+	}
+	m.trunkQueueRejected.WithLabelValues(trunk).Inc()
 }

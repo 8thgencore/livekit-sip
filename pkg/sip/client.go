@@ -67,6 +67,7 @@ type Client struct {
 	closing     core.Fuse
 	cmu         sync.Mutex
 	activeCalls map[LocalTag]*outboundCall
+	trunkQueues *outboundTrunkQueueManager
 
 	registrationManager *RegistrationManager
 
@@ -159,6 +160,7 @@ func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats
 		getSipClient:        DefaultGetSipClientFunc,
 		getRoom:             DefaultGetRoomFunc,
 		activeCalls:         make(map[LocalTag]*outboundCall),
+		trunkQueues:         newOutboundTrunkQueueManager(mon),
 	}
 	for _, option := range options {
 		option(c)
@@ -204,6 +206,9 @@ func (c *Client) Stop() {
 	c.cmu.Unlock()
 	for _, call := range calls {
 		call.Close(ctx)
+	}
+	if c.trunkQueues != nil {
+		c.trunkQueues.Stop()
 	}
 	if c.sipCli != nil {
 		c.sipCli.Close()
@@ -336,10 +341,18 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 		registerMode:    outboundRegisterModeFromRequest(req),
 	}
 	log.Infow("Creating SIP participant")
-	call, err := c.newCall(ctx, tid, c.conf, log, LocalTag(req.SipCallId), roomConf, sipConf, state, req.ProjectId)
+	trunkKey := outboundTrunkQueueKey(req)
+	releaseTrunkSlot, err := c.trunkQueues.Acquire(ctx, trunkKey)
 	if err != nil {
 		return nil, err
 	}
+
+	call, err := c.newCall(ctx, tid, c.conf, log, LocalTag(req.SipCallId), roomConf, sipConf, state, req.ProjectId)
+	if err != nil {
+		releaseTrunkSlot()
+		return nil, err
+	}
+	call.releaseTrunkSlot = releaseTrunkSlot
 	p := call.Participant()
 	// Start actual SIP call async.
 

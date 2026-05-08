@@ -110,6 +110,8 @@ type outboundCall struct {
 	lkRoom   RoomInterface
 	lkRoomIn msdk.PCM16Writer // output to room; OPUS at 48k
 	sipConf  sipOutboundConfig
+
+	releaseTrunkSlot func()
 }
 
 func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Config, log logger.Logger, id LocalTag, room RoomConfig, sipConf sipOutboundConfig, state *CallState, projectID string) (*outboundCall, error) {
@@ -394,6 +396,9 @@ func (c *outboundCall) close(ctx context.Context, err error, status CallStatus, 
 		c.stats.Closed.Store(true)
 		log := c.log.WithValues("status", status, "result", string(t.Result), "reason", t.Reason)
 		defer func() {
+			if c.releaseTrunkSlot != nil {
+				c.releaseTrunkSlot()
+			}
 			c.stats.Update()
 			c.printStats()
 			c.sigTs.Log(log)
