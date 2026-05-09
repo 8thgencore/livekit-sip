@@ -66,6 +66,7 @@ const (
 	inviteOKRetryAttempts      = 5
 	inviteOKRetryAttemptsNoACK = 2
 	inviteOkAckLateTimeout     = inviteOkRetryIntervalMax
+	authChallengeTimeout       = 30 * time.Second
 )
 
 var allowHeader = sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE")
@@ -158,7 +159,33 @@ func (s *Server) getInvite(sipCallID string) *inProgressInvite {
 	return is
 }
 
-func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Request, tx sip.ServerTransaction, from, username, password string) (ok bool) {
+// scheduleAuthChallengeTimeout finalizes st as SCS_ERROR after authChallengeTimeout
+// unless authResolved is set to true (by a follow-up INVITE) before the timer fires.
+func (i *inProgressInvite) scheduleAuthChallengeTimeout(st *CallState, log logger.Logger) {
+	i.authResolved.Store(false)
+	challengedAt := time.Now()
+	time.AfterFunc(authChallengeTimeout, func() {
+		if !i.authResolved.CompareAndSwap(false, true) {
+			return
+		}
+		log.Infow("auth challenge timed out without authenticated retry; finalizing call as error",
+			"sipCallID", i.sipCallID, "timeout", authChallengeTimeout)
+		st.Update(context.Background(), func(info *livekit.SIPCallInfo) {
+			info.CallStatus = livekit.SIPCallStatus_SCS_ERROR
+			info.Error = "auth challenge issued, no authenticated retry received"
+			// EndedAtNs reflects when the call effectively ended.
+			info.EndedAtNs = challengedAt.UnixNano()
+		})
+	})
+}
+
+// handleInviteAuth performs SIP digest authentication on an inbound INVITE.
+// The challenge return value distinguishes the normal digest handshake (where we
+// just sent the initial 407 with no credentials yet provided and expect the
+// client to retry) from a hard auth failure. Callers should treat
+// (ok=false, challenge=true) as non-terminal so it doesn't end up recorded as
+// a finalized error state.
+func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Request, tx sip.ServerTransaction, from, username, password string) (ok bool, challenge bool) {
 	log = log.WithValues(
 		"username", username,
 		"passwordHash", hashPassword(password),
@@ -170,7 +197,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 
 	if username == "" || password == "" {
 		log.Debugw("Skipping authentication - no credentials provided")
-		return true
+		return true, false
 	}
 
 	if s.conf.HideInboundPort {
@@ -205,7 +232,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 		res.AppendHeader(sip.NewHeader("Proxy-Authenticate", inviteState.challenge.String()))
 		_ = tx.Respond(res)
 		log.Infow("No Proxy header found. Sending 407 Unauthorized response with Proxy-Authenticate header")
-		return false
+		return false, true
 	}
 
 	log.Debugw("Found Proxy-Authorization header, parsing credentials")
@@ -215,7 +242,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 			"headerValue", h.Value(),
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false
+		return false, false
 	}
 
 	// Set credURI and credUsername in logger early to avoid repetitive logging
@@ -230,7 +257,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 			"receivedUsername", cred.Username,
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
-		return false
+		return false, false
 	}
 
 	// Check if we have a valid challenge state
@@ -240,7 +267,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 			"expectedRealm", UserAgent,
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false
+		return false, false
 	}
 
 	log.Debugw("Computing digest response",
@@ -259,7 +286,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	if err != nil {
 		log.Warnw("Failed to compute digest response", err)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false
+		return false, false
 	}
 
 	log.Debugw("Digest computation completed",
@@ -274,11 +301,11 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 			"receivedResponse", cred.Response,
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
-		return false
+		return false, false
 	}
 
 	log.Infow("SIP invite authentication successful")
-	return true
+	return true, false
 }
 
 func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) bool {
@@ -494,6 +521,14 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 			cc.Processing()
 			tryingTime = time.Now()
 		}
+		sipCallID := ""
+		if h := req.CallID(); h != nil {
+			sipCallID = h.Value()
+		}
+		inviteState := s.getInvite(sipCallID)
+		// New INVITE supersedes any pending 407-challenge timer for this Call-ID.
+		inviteState.authResolved.Store(true)
+
 		s.getCallInfo(cc.ID()).countInvite(log, req)
 		if registered {
 			log.Infow("SIP inbound REGISTER verified, accepting INVITE without digest challenge",
@@ -502,12 +537,18 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 			)
 			break
 		}
-		if !s.handleInviteAuth(tid, log, req, tx, from.User, r.Username, r.Password) {
+		if ok, challenge := s.handleInviteAuth(tid, log, req, tx, from.User, r.Username, r.Password); !ok {
 			// Store (call-ID + from tag) to (to tag) mapping
 			s.cmu.Lock()
 			s.provisionalInvites.Add([2]string{cc.SIPCallID(), string(cc.Tag())}, cc.ID())
 			s.cmu.Unlock()
 			cmon.InviteErrorShort(stats.ClientError("unauthorized"))
+			if challenge {
+				// 407 sent: defer finalization to the timer or the next INVITE,
+				// not the deferred handler at the top of processInvite.
+				inviteState.scheduleAuthChallengeTimeout(state, log)
+				state = nil
+			}
 			// handleInviteAuth will generate the SIP Response as needed
 			return psrpc.NewErrorf(psrpc.PermissionDenied, "invalid credentials were provided")
 		}
@@ -1305,6 +1346,16 @@ func (c *inboundCall) closeWithTimeout(ctx context.Context, isError bool) {
 	status := callDropped
 	if !isError {
 		status = callHangupMedia
+		// Surface the media-timeout banner on the dashboard while keeping the
+		// call status as a clean disconnect — post-ACK media timeout usually
+		// means BYE was lost, not that the call itself failed. Mirror the
+		// outbound info.Error format byte-for-byte so the same dashboard
+		// trigger fires for both inbound and outbound.
+		c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
+			if info.Error == "" {
+				info.Error = psrpc.NewErrorf(psrpc.DeadlineExceeded, "media-timeout").Error()
+			}
+		})
 	}
 	c.close(ctx, status, stats.ServerError("media-timeout"))
 }
