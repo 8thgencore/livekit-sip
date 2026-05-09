@@ -14,7 +14,7 @@ import (
 const (
 	outboundPerTrunkMaxConcurrentCalls = 1
 	outboundPerTrunkMaxQueuedCalls     = 128
-	outboundPerTrunkDialSpacing        = time.Second
+	outboundPerTrunkDialSpacing        = 2 * time.Second
 )
 
 type outboundTrunkQueueManager struct {
