@@ -65,7 +65,22 @@ func sendProxyAuthRequired(t *testing.T, tx *transactionRequest) {
 	}
 	resp := sip.NewResponseFromRequest(tx.req, sip.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
 	resp.AppendHeader(sip.NewHeader("Proxy-Authenticate", challenge.String()))
-	require.NoError(t, tx.transaction.SendResponse(resp))
+	sendTestResponse(t, tx, resp)
+}
+
+func sendTestResponse(t *testing.T, tx *transactionRequest, resp *sip.Response) {
+	t.Helper()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for {
+		err := tx.transaction.SendResponse(resp)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.NoError(t, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestOutboundProviderProfileResolution(t *testing.T) {
@@ -131,7 +146,7 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil))
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
@@ -147,7 +162,7 @@ func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 
 	require.Error(t, <-done)
 }
@@ -178,14 +193,14 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil))
 
 	registeredInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
 	registeredCallID := registeredInviteTx.req.CallID().Value()
 	require.Equal(t, mockSIPHost, registeredInviteTx.req.From().Address.Host)
 	require.Equal(t, mockRegisteredUser, registeredInviteTx.req.Contact().Address.User)
-	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	sendTestResponse(t, registeredInviteTx, sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil))
 
 	directInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, directInviteTx.req.Method)
@@ -194,7 +209,7 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	require.Equal(t, client.sconf.SignalingIP.String(), directInviteTx.req.From().Address.Host)
 	require.NotZero(t, directInviteTx.req.From().Address.Port)
 	require.Empty(t, directInviteTx.req.Contact().Address.User)
-	require.NoError(t, directInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	sendTestResponse(t, directInviteTx, sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil))
 
 	require.Error(t, <-done)
 }
@@ -219,11 +234,11 @@ func TestOutboundInviteProviderCanDisableDirectFallbackAfterRegisteredBusyHere(t
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil))
 
 	registeredInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
-	require.NoError(t, registeredInviteTx.transaction.SendResponse(sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil)))
+	sendTestResponse(t, registeredInviteTx, sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil))
 	require.Error(t, <-done)
 
 	select {
@@ -232,6 +247,49 @@ func TestOutboundInviteProviderCanDisableDirectFallbackAfterRegisteredBusyHere(t
 		t.Fatalf("unexpected direct fallback transaction: %s", retryTx.req.Method)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+func TestOutboundInviteWaitsBrieflyAfterFreshRegister(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	req := MinimalCreateSIPParticipantRequest()
+	req.Address = "pbx.uiscom.ru:5060"
+	req.Hostname = ""
+	req.Username = "0526470"
+	req.Password = "test-password"
+	req.Number = "0526470"
+	req.CallTo = "+77057756019"
+	req.WaitUntilAnswered = true
+
+	prevDelay := invitePostRegisterSettlingDelay
+	invitePostRegisterSettlingDelay = 50 * time.Millisecond
+	defer func() {
+		invitePostRegisterSettlingDelay = prevDelay
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateSIPParticipant(ctx, req)
+		done <- err
+	}()
+
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+
+	select {
+	case tx := <-sipClient.transactions:
+		t.Fatalf("unexpected %s before post-register settling delay elapsed", tx.req.Method)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	inviteTx := waitTransactionWithTimeout(t, sipClient, 200*time.Millisecond)
+	require.Equal(t, sip.INVITE, inviteTx.req.Method)
+	cancel()
+	require.Error(t, <-done)
 }
 
 func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *testing.T) {

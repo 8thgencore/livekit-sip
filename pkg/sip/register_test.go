@@ -351,7 +351,7 @@ func getCreatedSIPClient(t *testing.T) *testSIPClient {
 }
 
 func waitTransaction(t *testing.T, sipClient *testSIPClient) *transactionRequest {
-	return waitTransactionWithTimeout(t, sipClient, 500*time.Millisecond)
+	return waitTransactionWithTimeout(t, sipClient, 2*time.Second)
 }
 
 func waitTransactionWithTimeout(t *testing.T, sipClient *testSIPClient, timeout time.Duration) *transactionRequest {

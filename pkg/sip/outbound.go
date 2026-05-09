@@ -715,6 +715,11 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 	c.sigTs.InviteTime = time.Now()
 
 	toUri := CreateURIFromUserAndAddress(c.sipConf.to, c.sipConf.address, TransportFrom(c.sipConf.transport))
+	if c.regProfile != nil {
+		if err := c.c.registrationManager.waitForRegisterSettling(ctx, c.regProfile.cacheKey(), invitePostRegisterSettlingDelay); err != nil {
+			return err
+		}
+	}
 
 	ringing := false
 	setState := func(code sip.StatusCode, hdrs Headers) {

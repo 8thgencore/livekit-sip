@@ -25,8 +25,9 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		DirectAuthFailureIsConfigError: true,
 	},
 	"uiscom.ru": {
-		ID: "uiscom",
+		ID:                                  "uiscom",
 		AllowRegisteredInviteDirectFallback: true,
+		DeleteTrunkAfterCall:                true,
 	},
 	"mtt.ru": {
 		ID:                                  "mtt",

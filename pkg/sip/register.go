@@ -30,6 +30,8 @@ const (
 	inviteAuthMaxAttempts     = 3
 )
 
+var invitePostRegisterSettlingDelay = time.Second
+
 type outboundRegisterMode int32
 
 const (
@@ -289,6 +291,28 @@ func (m *RegistrationManager) freshSuccessfulRegisterAge(key string, maxAge time
 	}
 	age := time.Since(st.lastSuccessAt)
 	return age, age >= 0 && age <= maxAge
+}
+
+func (m *RegistrationManager) waitForRegisterSettling(ctx context.Context, key string, minAge time.Duration) error {
+	if m == nil || key == "" || minAge <= 0 {
+		return nil
+	}
+	age, ok := m.freshSuccessfulRegisterAge(key, minAge)
+	if !ok {
+		return nil
+	}
+	wait := minAge - age
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c *ResolvedRegistrationConfig) clone() *ResolvedRegistrationConfig {
