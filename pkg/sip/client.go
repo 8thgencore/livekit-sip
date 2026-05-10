@@ -275,6 +275,7 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 	if err != nil {
 		return nil, err
 	}
+	mconf = applyOutboundProviderMediaProfile(req.Address, req.Media, mconf)
 	tid := traceid.FromGUID(req.SipCallId)
 	log = log.WithValues(
 		"callID", req.SipCallId,
@@ -342,10 +343,34 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 	}
 	log.Infow("Creating SIP participant")
 	trunkKey := outboundTrunkQueueKey(req)
+	queueStatus := c.trunkQueues.Status(trunkKey)
+	log.Infow("waiting for outbound trunk slot",
+		"trunkKey", trunkKey,
+		"queued", queueStatus.Waiting,
+		"active", queueStatus.Running,
+		"acquired", false,
+	)
+	queueStart := time.Now()
 	releaseTrunkSlot, err := c.trunkQueues.Acquire(ctx, trunkKey)
 	if err != nil {
+		queueStatus = c.trunkQueues.Status(trunkKey)
+		log.Warnw("failed to acquire outbound trunk slot", err,
+			"trunkKey", trunkKey,
+			"queueWaitMs", time.Since(queueStart).Milliseconds(),
+			"queued", queueStatus.Waiting,
+			"active", queueStatus.Running,
+			"acquired", false,
+		)
 		return nil, err
 	}
+	queueStatus = c.trunkQueues.Status(trunkKey)
+	log.Infow("acquired outbound trunk slot",
+		"trunkKey", trunkKey,
+		"queueWaitMs", time.Since(queueStart).Milliseconds(),
+		"queued", queueStatus.Waiting,
+		"active", queueStatus.Running,
+		"acquired", true,
+	)
 
 	call, err := c.newCall(ctx, tid, c.conf, log, LocalTag(req.SipCallId), roomConf, sipConf, state, req.ProjectId)
 	if err != nil {

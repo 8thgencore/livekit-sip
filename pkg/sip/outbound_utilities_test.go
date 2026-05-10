@@ -375,7 +375,7 @@ func (w *testSIPClient) TransactionRequest(req *sip.Request, options ...sipgo.Cl
 	w.FillRequestBlanks(req)
 	w.sequence++
 	tx := &testSIPClientTransaction{
-		responses: make(chan *sip.Response),
+		responses: make(chan *sip.Response, 8),
 		cancels:   make(chan struct{}),
 		done:      make(chan struct{}),
 		err:       make(chan error),

@@ -23,6 +23,11 @@ type outboundTrunkQueueManager struct {
 	trunks map[string]*outboundTrunkQueue
 }
 
+type outboundTrunkQueueStatus struct {
+	Running int
+	Waiting int
+}
+
 type outboundTrunkQueue struct {
 	running   int
 	lastStart time.Time
@@ -114,6 +119,23 @@ func (m *outboundTrunkQueueManager) Release(key string) {
 	m.scheduleLocked(q)
 	m.cleanupQueueLocked(key, q)
 	m.updateMetricsLocked(key, q)
+}
+
+func (m *outboundTrunkQueueManager) Status(key string) outboundTrunkQueueStatus {
+	if m == nil {
+		return outboundTrunkQueueStatus{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	q := m.trunks[key]
+	if q == nil {
+		return outboundTrunkQueueStatus{}
+	}
+	return outboundTrunkQueueStatus{
+		Running: q.running,
+		Waiting: len(q.waiters),
+	}
 }
 
 func (m *outboundTrunkQueueManager) Stop() {

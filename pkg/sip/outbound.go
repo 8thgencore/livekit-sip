@@ -466,39 +466,7 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.dialSIP(ctx, tid); err != nil {
-		reportErr := err
-		status, term, reason := callDropped, stats.ServerError("invite-failed"), livekit.DisconnectReason_UNKNOWN_REASON
-		var e *livekit.SIPStatus
-		if errors.As(err, &e) {
-			switch int(e.Code) {
-			case int(sip.StatusRequestTerminated):
-				status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
-				reportErr = nil
-			case int(sip.StatusTemporarilyUnavailable):
-				status, term, reason = callUnavailable, stats.ClientError("unavailable"), livekit.DisconnectReason_USER_UNAVAILABLE
-				reportErr = nil
-			case int(sip.StatusRequestTimeout):
-				status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
-				reportErr = nil
-			case int(sip.StatusBusyHere):
-				status, term, reason = callRejected, stats.ClientError("busy"), livekit.DisconnectReason_USER_REJECTED
-				reportErr = nil
-			}
-		} else if e := (SDPError{}); errors.As(err, &e) {
-			status, reason = callRejected, livekit.DisconnectReason_MEDIA_FAILURE
-			reportErr = nil
-			err = psrpc.NewError(psrpc.FailedPrecondition, e.Err)
-			if errors.Is(e.Err, sdp.ErrNoCommonMedia) {
-				term = stats.ClientError("no-common-codec")
-			} else if errors.Is(e.Err, sdp.ErrNoCommonCrypto) {
-				term = stats.ClientError("encryption-required")
-			} else {
-				term = stats.ClientError("sdp-error")
-			}
-		} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
-			status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
-			reportErr = nil
-		}
+		reportErr, status, term, reason := c.classifySIPConnectError(err)
 		if reportErr == nil {
 			c.log.Infow("SIP call ended with expected SIP status", "error", err)
 		} else {
@@ -512,6 +480,59 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.lkRoom.Subscribe()
 	c.log.Infow("Outbound SIP call established")
 	return nil
+}
+
+func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, stats.Termination, livekit.DisconnectReason) {
+	reportErr := err
+	status, term, reason := callDropped, stats.ServerError("invite-failed"), livekit.DisconnectReason_UNKNOWN_REASON
+	var e *livekit.SIPStatus
+	if errors.As(err, &e) {
+		switch int(e.Code) {
+		case int(sip.StatusRequestTerminated):
+			status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
+			reportErr = nil
+		case int(sip.StatusTemporarilyUnavailable):
+			status, term, reason = callUnavailable, stats.ClientError("unavailable"), livekit.DisconnectReason_USER_UNAVAILABLE
+			reportErr = nil
+		case int(sip.StatusRequestTimeout):
+			status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
+			reportErr = nil
+		case int(sip.StatusBusyHere):
+			status, term, reason = callRejected, stats.ClientError("busy"), livekit.DisconnectReason_USER_REJECTED
+			reportErr = nil
+		}
+	} else if e := (SDPError{}); errors.As(err, &e) {
+		status, reason = callRejected, livekit.DisconnectReason_MEDIA_FAILURE
+		reportErr = nil
+		err = psrpc.NewError(psrpc.FailedPrecondition, e.Err)
+		if errors.Is(e.Err, sdp.ErrNoCommonMedia) {
+			term = stats.ClientError("no-common-codec")
+		} else if errors.Is(e.Err, sdp.ErrNoCommonCrypto) {
+			term = stats.ClientError("encryption-required")
+		} else {
+			term = stats.ClientError("sdp-error")
+		}
+	} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
+		status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
+		reportErr = nil
+	} else if c.inviteTimedOutAfterRemoteProgress(err) {
+		status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
+		reportErr = nil
+	}
+	return reportErr, status, term, reason
+}
+
+func (c *outboundCall) inviteTimedOutAfterRemoteProgress(err error) bool {
+	if err == nil || c == nil {
+		return false
+	}
+	if c.sigTs.TryingTime.IsZero() && c.sigTs.RingingTime.IsZero() {
+		return false
+	}
+	var psrpcErr psrpc.Error
+	return errors.As(err, &psrpcErr) &&
+		psrpcErr.Code() == psrpc.Canceled &&
+		strings.Contains(err.Error(), "sip request timed out")
 }
 
 func (c *outboundCall) connectToRoom(ctx context.Context, lkNew RoomConfig, getRoom GetRoomFunc) error {

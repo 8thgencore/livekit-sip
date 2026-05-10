@@ -67,7 +67,7 @@ func TestOutboundTrunkQueueFIFOAndSpacing(t *testing.T) {
 	select {
 	case got := <-started:
 		require.Equal(t, 2, got)
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(outboundPerTrunkDialSpacing + 500*time.Millisecond):
 		t.Fatal("second acquire did not start after release")
 	}
 

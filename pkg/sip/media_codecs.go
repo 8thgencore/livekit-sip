@@ -55,6 +55,20 @@ func newMediaConfig(m *livekit.SIPMediaConfig) (*sipMediaConfig, error) {
 	}, nil
 }
 
+func applyOutboundProviderMediaProfile(address string, req *livekit.SIPMediaConfig, conf *sipMediaConfig) *sipMediaConfig {
+	if conf == nil || !outboundProviderProfileForAddress(address).DefaultG711Only {
+		return conf
+	}
+	if req.GetOnlyListedCodecs() || len(req.GetCodecs()) != 0 {
+		return conf
+	}
+
+	cp := *conf
+	cp.Codecs = conf.Codecs.NewSet()
+	cp.Codecs.SetEnabled(g722.SDPName, false)
+	return &cp
+}
+
 type sipMediaConfig struct {
 	Encryption sdp.Encryption
 	Codecs     *msdk.CodecSet

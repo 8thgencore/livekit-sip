@@ -25,8 +25,11 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/icholy/digest"
+	"github.com/livekit/media-sdk/g711"
+	"github.com/livekit/media-sdk/g722"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/psrpc"
 	"github.com/livekit/sip/pkg/stats"
 	"github.com/livekit/sipgo/sip"
 )
@@ -96,7 +99,10 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	uiscom := outboundProviderProfileForAddress("pbx.uiscom.ru.")
 	require.Equal(t, "uiscom", uiscom.ID)
 	require.False(t, uiscom.SkipRegistrationInAuto)
-	require.False(t, uiscom.AllowRegisteredInviteDirectFallback)
+	require.True(t, uiscom.AllowRegisteredInviteDirectFallback)
+	require.False(t, uiscom.DeleteTrunkAfterCall)
+	require.True(t, uiscom.DefaultG711Only)
+	require.False(t, ShouldDeleteOutboundTrunkAfterCall("pbx.uiscom.ru:5060"))
 
 	mtt := outboundProviderProfileForAddress("mtt.ru:5060")
 	require.Equal(t, "mtt", mtt.ID)
@@ -117,6 +123,54 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 
 	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
 	require.Equal(t, "universal", nearMiss.ID)
+}
+
+func TestOutboundProviderMediaProfileRestrictsUiscomDefaultsToG711(t *testing.T) {
+	reqMedia := &livekit.SIPMediaConfig{}
+	mconf, err := newMediaConfig(reqMedia)
+	require.NoError(t, err)
+	require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
+	require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
+	require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+
+	mconf = applyOutboundProviderMediaProfile("pbx.uiscom.ru:5060", reqMedia, mconf)
+	require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
+	require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
+	require.False(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+}
+
+func TestOutboundProviderMediaProfileKeepsExplicitCodecs(t *testing.T) {
+	reqMedia := &livekit.SIPMediaConfig{
+		Codecs: []*livekit.SIPCodec{{Name: "G722", Rate: 8000}},
+	}
+	mconf, err := newMediaConfig(reqMedia)
+	require.NoError(t, err)
+
+	mconf = applyOutboundProviderMediaProfile("pbx.uiscom.ru:5060", reqMedia, mconf)
+	require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+}
+
+func TestOutboundConnectErrorClassifiesInviteTimeoutAfterProgress(t *testing.T) {
+	call := &outboundCall{
+		sigTs: SignalingTimestamps{RingingTime: time.Now()},
+	}
+	reportErr, status, term, reason := call.classifySIPConnectError(psrpc.NewErrorf(psrpc.Canceled, "sip request timed out"))
+
+	require.NoError(t, reportErr)
+	require.Equal(t, callUnavailable, status)
+	require.Equal(t, stats.ClientError("request-timeout"), term)
+	require.Equal(t, livekit.DisconnectReason_USER_UNAVAILABLE, reason)
+}
+
+func TestOutboundConnectErrorKeepsInviteTimeoutBeforeProgressAsServerError(t *testing.T) {
+	call := &outboundCall{}
+	err := psrpc.NewErrorf(psrpc.Canceled, "sip request timed out")
+	reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+	require.ErrorIs(t, reportErr, err)
+	require.Equal(t, callDropped, status)
+	require.Equal(t, stats.ServerError("invite-failed"), term)
+	require.Equal(t, livekit.DisconnectReason_UNKNOWN_REASON, reason)
 }
 
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
@@ -214,7 +268,7 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteProviderCanDisableDirectFallbackAfterRegisteredBusyHere(t *testing.T) {
+func TestOutboundInviteUiscomAllowsDirectFallbackAfterRegisteredBusyHere(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
@@ -238,15 +292,18 @@ func TestOutboundInviteProviderCanDisableDirectFallbackAfterRegisteredBusyHere(t
 
 	registeredInviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, registeredInviteTx.req.Method)
+	registeredCallID := registeredInviteTx.req.CallID().Value()
 	sendTestResponse(t, registeredInviteTx, sip.NewResponseFromRequest(registeredInviteTx.req, sip.StatusBusyHere, "Busy Here", nil))
-	require.Error(t, <-done)
 
-	select {
-	case retryTx := <-sipClient.transactions:
-		t.Cleanup(func() { retryTx.transaction.Terminate() })
-		t.Fatalf("unexpected direct fallback transaction: %s", retryTx.req.Method)
-	case <-time.After(100 * time.Millisecond):
-	}
+	directInviteTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, directInviteTx.req.Method)
+	require.NotEqual(t, registeredCallID, directInviteTx.req.CallID().Value())
+	require.Equal(t, uint32(1), directInviteTx.req.CSeq().SeqNo)
+	require.Equal(t, client.sconf.SignalingIP.String(), directInviteTx.req.From().Address.Host)
+	require.NotZero(t, directInviteTx.req.From().Address.Port)
+	require.Empty(t, directInviteTx.req.Contact().Address.User)
+	sendTestResponse(t, directInviteTx, sip.NewResponseFromRequest(directInviteTx.req, sip.StatusBusyHere, "Busy Here", nil))
+	require.Error(t, <-done)
 }
 
 func TestOutboundInviteWaitsBrieflyAfterFreshRegister(t *testing.T) {

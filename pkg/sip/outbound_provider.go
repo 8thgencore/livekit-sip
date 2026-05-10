@@ -11,6 +11,7 @@ type outboundProviderProfile struct {
 	AllowRegisteredInviteDirectFallback bool
 	DirectAuthFailureIsConfigError      bool
 	DeleteTrunkAfterCall                bool
+	DefaultG711Only                     bool
 }
 
 var universalOutboundProviderProfile = outboundProviderProfile{
@@ -27,7 +28,7 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 	"uiscom.ru": {
 		ID:                                  "uiscom",
 		AllowRegisteredInviteDirectFallback: true,
-		DeleteTrunkAfterCall:                true,
+		DefaultG711Only:                     true,
 	},
 	"mtt.ru": {
 		ID:                                  "mtt",

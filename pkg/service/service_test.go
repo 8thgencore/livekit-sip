@@ -127,6 +127,15 @@ func TestOnSessionEndDoesNotDeleteNonSipuniOutboundTrunk(t *testing.T) {
 	require.Empty(t, deleter.deleted)
 }
 
+func TestOnSessionEndDoesNotDeleteUiscomOutboundTrunk(t *testing.T) {
+	deleter := &fakeSIPTrunkClient{}
+	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
+
+	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoForHost("pbx.uiscom.ru"), "bye")
+
+	require.Empty(t, deleter.deleted)
+}
+
 func outboundCallInfoWithError(errText string) *livekit.SIPCallInfo {
 	return &livekit.SIPCallInfo{
 		CallId:        "SCL_test",
