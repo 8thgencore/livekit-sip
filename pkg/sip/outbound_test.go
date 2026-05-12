@@ -409,7 +409,7 @@ func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "123456", "test-password", nil, []byte("v=0\r\n"), nil)
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "123456", "test-password", nil, []byte("v=0\r\n"), nil, nil)
 		result <- err
 	}()
 
@@ -447,6 +447,33 @@ func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 
 	require.NoError(t, authInvite.transaction.SendResponse(sip.NewResponseFromRequest(authInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n"))))
 	require.NoError(t, <-result)
+}
+
+func TestOutboundInviteSentCallbackRunsBeforeFinalResponse(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	toURI := CreateURIFromUserAndAddress("+79998887722", "login.test.com:5060", TransportUDP)
+
+	inviteSent := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "", "", nil, []byte("v=0\r\n"), nil, func() {
+			close(inviteSent)
+		})
+		result <- err
+	}()
+
+	invite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, invite.req.Method)
+	select {
+	case <-inviteSent:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected invite sent callback before final SIP response")
+	}
+
+	sendTestResponse(t, invite, sip.NewResponseFromRequest(invite.req, sip.StatusBusyHere, "Busy Here", nil))
+	require.Error(t, <-result)
 }
 
 func TestOutboundInviteRequestTerminatedIsClientError(t *testing.T) {

@@ -618,6 +618,7 @@ func (c *outboundCall) connectMedia() {
 }
 
 type sipRespFunc func(code sip.StatusCode, hdrs Headers)
+type sipInviteSentFunc func()
 
 func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan struct{}, setState sipRespFunc) (*sip.Response, error) {
 	cnt := 0
@@ -757,9 +758,9 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		}
 		c.setExtraAttrs(nil, 0, nil, hdrs)
 	}
-	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	sdpResp, err := c.cc.Invite(ctx, toUri, c.regProfile, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState, c.releaseTrunkSlot)
 	if c.shouldRetryInviteWithoutRegistration(err) {
-		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState)
+		sdpResp, err = c.retryInviteWithoutRegistration(ctx, toUri, sdpOfferData, setState, c.releaseTrunkSlot)
 	}
 	// Update SIPCallInfo with the SIP Call-ID after Invite
 	if sipCallID := c.cc.SIPCallID(); sipCallID != "" {
@@ -844,7 +845,7 @@ func (c *outboundCall) shouldRetryInviteWithoutRegistration(err error) bool {
 	return errors.As(err, &sipErr) && sipErr.Code == livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE
 }
 
-func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc) ([]byte, error) {
+func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri URI, sdpOfferData []byte, setState sipRespFunc, onInviteSent sipInviteSentFunc) ([]byte, error) {
 	c.log.Infow("retrying SIP INVITE without outbound REGISTER profile",
 		"retry_reason", "registered_invite_busy_here",
 		"registerMode", c.sipConf.registerMode.String(),
@@ -854,7 +855,7 @@ func (c *outboundCall) retryInviteWithoutRegistration(ctx context.Context, toUri
 	c.cc = c.c.newOutbound(c.log, c.cc.ID(), c.directFrom, c.directContact, c.sipConf.displayName, getHeaders)
 	c.regProfile = nil
 	c.mon.InviteReq()
-	return c.cc.InviteWithFreshCallID(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState)
+	return c.cc.InviteWithFreshCallID(ctx, toUri, nil, c.sipConf.user, c.sipConf.pass, c.sipConf.headers, sdpOfferData, setState, onInviteSent)
 }
 
 func (c *outboundCall) handleDTMF(ev dtmf.Event) {
@@ -1062,15 +1063,15 @@ func (c *sipOutbound) RemoteHeaders() Headers {
 	return c.inviteOk.Headers()
 }
 
-func (c *sipOutbound) Invite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
-	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, false)
+func (c *sipOutbound) Invite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, onInviteSent sipInviteSentFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, onInviteSent, false)
 }
 
-func (c *sipOutbound) InviteWithFreshCallID(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc) ([]byte, error) {
-	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, true)
+func (c *sipOutbound) InviteWithFreshCallID(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, onInviteSent sipInviteSentFunc) ([]byte, error) {
+	return c.doInvite(ctx, to, regProfile, user, pass, headers, sdpOffer, setState, onInviteSent, true)
 }
 
-func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, freshCallID bool) ([]byte, error) {
+func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *ResolvedRegistrationConfig, user, pass string, headers map[string]string, sdpOffer []byte, setState sipRespFunc, onInviteSent sipInviteSentFunc, freshCallID bool) ([]byte, error) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.Invite")
 	defer span.End()
 	c.mu.Lock()
@@ -1115,7 +1116,7 @@ authLoop:
 			}
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
 		}
-		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState)
+		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState, onInviteSent)
 		if err != nil {
 			return nil, err
 		}
@@ -1279,7 +1280,7 @@ func (c *sipOutbound) AckInviteOK(ctx context.Context) error {
 	return c.c.sipCli.WriteRequest(sip.NewAckRequest(c.invite, c.inviteOk, nil))
 }
 
-func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader, to *sip.ToHeader, offer []byte, authHeaderName, authHeader string, headers Headers, setState sipRespFunc) (*sip.Request, *sip.Response, error) {
+func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader, to *sip.ToHeader, offer []byte, authHeaderName, authHeader string, headers Headers, setState sipRespFunc, onInviteSent sipInviteSentFunc) (*sip.Request, *sip.Response, error) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.attemptInvite")
 	defer span.End()
 	req := sip.NewRequest(sip.INVITE, to.Address)
@@ -1312,6 +1313,9 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 		return nil, nil, err
 	}
 	defer tx.Terminate()
+	if onInviteSent != nil {
+		onInviteSent()
+	}
 	c.log.Infow("SIP INVITE request prepared", inviteRequestLogFields(req)...)
 
 	// Log the actual local port used for TCP connections from the DialPort range

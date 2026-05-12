@@ -309,7 +309,7 @@ func (m *Monitor) Start(conf *config.Config) error {
 		Namespace:   "livekit",
 		Subsystem:   "sip",
 		Name:        "outbound_trunk_active_calls",
-		Help:        "[trunk_queue] Number of active outbound calls currently holding a trunk slot",
+		Help:        "[trunk_queue] Number of outbound call initiations currently holding a trunk slot",
 		ConstLabels: prometheus.Labels{"node_id": conf.NodeID},
 	}, []string{"trunk"}))
 
