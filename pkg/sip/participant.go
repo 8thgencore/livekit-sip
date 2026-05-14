@@ -96,7 +96,7 @@ func (v CallStatus) Attribute() string {
 		return "automation"
 	case CallActive:
 		return "active"
-	case CallHangup, callHangupMedia:
+	case CallHangup, callHangupMedia, CallCancelled:
 		return "hangup"
 	}
 }
@@ -105,7 +105,7 @@ func (v CallStatus) DisconnectReason() livekit.DisconnectReason {
 	switch v {
 	default:
 		return livekit.DisconnectReason_UNKNOWN_REASON
-	case CallHangup, callHangupMedia:
+	case CallHangup, callHangupMedia, CallCancelled:
 		// It's the default that LK sets, but map it here explicitly to show the assumption.
 		return livekit.DisconnectReason_CLIENT_INITIATED
 	case callUnavailable:
@@ -117,10 +117,12 @@ func (v CallStatus) DisconnectReason() livekit.DisconnectReason {
 
 func (v CallStatus) SIPStatus() (sip.StatusCode, string) {
 	switch v {
-	default:
-		return sip.StatusBusyHere, "Rejected"
 	case callMediaFailed:
 		return sip.StatusNotAcceptableHere, "MediaFailed"
+	case CallCancelled:
+		return sip.StatusRequestTerminated, "Request Terminated"
+	default:
+		return sip.StatusBusyHere, "Rejected"
 	}
 }
 
@@ -132,6 +134,7 @@ const (
 	CallAutomation
 	CallActive
 	CallHangup
+	CallCancelled
 	callUnavailable
 	callRejected
 	callMediaFailed

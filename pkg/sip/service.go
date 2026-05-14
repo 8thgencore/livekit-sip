@@ -265,7 +265,7 @@ func (s *Service) Start() error {
 			}()
 		}
 		tlsConf = &tls.Config{
-			NextProtos:   []string{"sip"},
+			NextProtos:   tlsALPNProtocols(tconf.ALPNProtocols),
 			Certificates: certs,
 			KeyLogWriter: keyLog,
 		}
