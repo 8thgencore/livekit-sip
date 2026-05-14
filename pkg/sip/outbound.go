@@ -488,6 +488,8 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 	var e *livekit.SIPStatus
 	if errors.As(err, &e) {
 		switch int(e.Code) {
+		case int(sip.StatusForbidden):
+			status, term, reason = callDropped, stats.ServerError("forbidden"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
 		case int(sip.StatusRequestTerminated):
 			status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
 			reportErr = nil

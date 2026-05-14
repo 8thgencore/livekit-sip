@@ -67,6 +67,39 @@ func TestOnSessionEndDeletesOutboundTrunkForAuthFailures(t *testing.T) {
 	}
 }
 
+func TestOnSessionEndDeletesOutboundTrunkForForbiddenFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		reason   string
+		callInfo *livekit.SIPCallInfo
+	}{
+		{
+			name:     "forbidden reason",
+			reason:   "forbidden",
+			callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN),
+		},
+		{
+			name:     "forbidden status",
+			callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN),
+		},
+		{
+			name:     "forbidden error text",
+			callInfo: outboundCallInfoWithError("unexpected status from INVITE response: sip status: 403: Forbidden"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleter := &fakeSIPTrunkClient{}
+			svc := &Service{log: logger.GetLogger(), sipClient: deleter}
+
+			svc.OnSessionEnd(context.Background(), nil, tt.callInfo, tt.reason)
+
+			require.Equal(t, []string{"ST_test"}, deleter.deleted)
+		})
+	}
+}
+
 func TestOnSessionEndDoesNotDeleteOutboundTrunkForNormalFailures(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -80,8 +113,6 @@ func TestOnSessionEndDoesNotDeleteOutboundTrunkForNormalFailures(t *testing.T) {
 		{name: "declined", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_GLOBAL_DECLINE)},
 		{name: "declined invite error text", callInfo: outboundCallInfoWithError("unexpected status from INVITE response: sip status: 603: Declined")},
 		{name: "permission denied wrapper with declined sip status", callInfo: outboundCallInfoWithError("SIP dial failed: TwirpError(code=permission_denied, message=twirp error unknown: unexpected status from INVITE response: sip status: 603: Declined, status=403, metadata={'sip_status_code': '603'})")},
-		{name: "forbidden status", callInfo: outboundCallInfoWithStatus(livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN)},
-		{name: "forbidden error text", callInfo: outboundCallInfoWithError("unexpected status from INVITE response: sip status: 403: Forbidden")},
 		{name: "inbound auth loop", callInfo: inboundCallInfoWithError("max auth retry attempts reached for SIP invite")},
 		{name: "empty trunk", callInfo: &livekit.SIPCallInfo{
 			CallDirection: livekit.SIPCallDirection_SCD_OUTBOUND,

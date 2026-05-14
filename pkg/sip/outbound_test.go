@@ -127,7 +127,7 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 
 func TestOutboundProviderMediaProfileRestrictsUiscomDefaultsToG711(t *testing.T) {
 	reqMedia := &livekit.SIPMediaConfig{}
-	mconf, err := newMediaConfig(reqMedia)
+	mconf, err := newMediaConfig(reqMedia, 0)
 	require.NoError(t, err)
 	require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
 	require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
@@ -143,7 +143,7 @@ func TestOutboundProviderMediaProfileKeepsExplicitCodecs(t *testing.T) {
 	reqMedia := &livekit.SIPMediaConfig{
 		Codecs: []*livekit.SIPCodec{{Name: "G722", Rate: 8000}},
 	}
-	mconf, err := newMediaConfig(reqMedia)
+	mconf, err := newMediaConfig(reqMedia, 0)
 	require.NoError(t, err)
 
 	mconf = applyOutboundProviderMediaProfile("pbx.uiscom.ru:5060", reqMedia, mconf)
@@ -171,6 +171,20 @@ func TestOutboundConnectErrorKeepsInviteTimeoutBeforeProgressAsServerError(t *te
 	require.Equal(t, callDropped, status)
 	require.Equal(t, stats.ServerError("invite-failed"), term)
 	require.Equal(t, livekit.DisconnectReason_UNKNOWN_REASON, reason)
+}
+
+func TestOutboundConnectErrorClassifiesForbiddenAsTrunkFailure(t *testing.T) {
+	call := &outboundCall{}
+	err := fmt.Errorf("invite failed: %w", &livekit.SIPStatus{
+		Code:   livekit.SIPStatusCode_SIP_STATUS_FORBIDDEN,
+		Status: "Forbidden",
+	})
+	reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+	require.ErrorIs(t, reportErr, err)
+	require.Equal(t, callDropped, status)
+	require.Equal(t, stats.ServerError("forbidden"), term)
+	require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
 }
 
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
