@@ -80,11 +80,16 @@ type AuthInfo struct {
 	Result       AuthResult
 	ProjectID    string
 	TrunkID      string
-	Username     string
-	Password     string
+	Auth         InboundAuth
 	RegisterAddr string
 	RegisterTr   livekit.SIPTransport
 	ProviderInfo *livekit.ProviderInfo
+}
+
+type InboundAuth struct {
+	Username string
+	Password string
+	Realm    string
 }
 
 type DispatchResult int

@@ -152,8 +152,7 @@ func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *l
 	auth := AuthInfo{
 		Result:       AuthPassword,
 		TrunkID:      trunk.GetSipTrunkId(),
-		Username:     user,
-		Password:     pass,
+		Auth:         InboundAuth{Username: user, Password: pass},
 		RegisterAddr: address,
 		RegisterTr:   transportFromMetadata(meta.SIPEndpoint.Transport),
 	}

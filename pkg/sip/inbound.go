@@ -185,17 +185,20 @@ func (i *inProgressInvite) scheduleAuthChallengeTimeout(st *CallState, log logge
 // client to retry) from a hard auth failure. Callers should treat
 // (ok=false, challenge=true) as non-terminal so it doesn't end up recorded as
 // a finalized error state.
-func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Request, tx sip.ServerTransaction, from, username, password string) (ok bool, challenge bool) {
+func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Request, tx sip.ServerTransaction, from string, auth InboundAuth) (ok bool, challenge bool) {
+	if auth.Realm == "" {
+		auth.Realm = UserAgent
+	}
 	log = log.WithValues(
-		"username", username,
-		"passwordHash", hashPassword(password),
+		"username", auth.Username,
+		"passwordHash", hashPassword(auth.Password),
 		"method", req.Method.String(),
 		"uri", req.Recipient.String(),
 	)
 
 	log.Infow("Starting SIP invite authentication")
 
-	if username == "" || password == "" {
+	if auth.Username == "" || auth.Password == "" {
 		log.Debugw("Skipping authentication - no credentials provided")
 		return true, false
 	}
@@ -217,7 +220,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	h := req.GetHeader("Proxy-Authorization")
 	if h == nil {
 		inviteState.challenge = digest.Challenge{
-			Realm:     UserAgent,
+			Realm:     auth.Realm,
 			Nonce:     generateNonce(sipCallID),
 			Algorithm: "MD5",
 		}
@@ -251,9 +254,9 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	log.Debugw("Parsed credentials successfully", "cred", cred)
 
 	// Validate that the username in the request matches the expected username
-	if cred.Username != username {
+	if cred.Username != auth.Username {
 		log.Warnw("Authentication failed - username mismatch", errors.New("username mismatch"),
-			"expectedUsername", username,
+			"expectedUsername", auth.Username,
 			"receivedUsername", cred.Username,
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
@@ -264,7 +267,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 	if inviteState.challenge.Realm == "" {
 		log.Warnw("No challenge state found for authentication attempt", errors.New("missing challenge state"),
 			"sipCallID", sipCallID,
-			"expectedRealm", UserAgent,
+			"expectedRealm", auth.Realm,
 		)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
 		return false, false
@@ -280,7 +283,7 @@ func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Re
 		Method:   req.Method.String(),
 		URI:      cred.URI,
 		Username: cred.Username,
-		Password: password,
+		Password: auth.Password,
 	})
 
 	if err != nil {
@@ -312,14 +315,14 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 	if s == nil || s.cli == nil {
 		return false
 	}
-	if auth.Username == "" || auth.Password == "" || auth.RegisterAddr == "" {
+	if auth.Auth.Username == "" || auth.Auth.Password == "" || auth.RegisterAddr == "" {
 		return false
 	}
 	regConf := sipOutboundConfig{
 		address:      auth.RegisterAddr,
 		transport:    auth.RegisterTr,
-		user:         auth.Username,
-		pass:         auth.Password,
+		user:         auth.Auth.Username,
+		pass:         auth.Auth.Password,
 		registerMode: outboundRegisterModeAuto,
 	}
 	if regConf.transport == livekit.SIPTransport_SIP_TRANSPORT_AUTO {
@@ -330,7 +333,7 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 		log.Warnw("SIP inbound REGISTER attempt failed, continuing without registration", err,
 			"registrar", auth.RegisterAddr,
 			"transport", TransportFrom(regConf.transport),
-			"authUser", auth.Username,
+			"authUser", auth.Auth.Username,
 		)
 		return false
 	}
@@ -533,11 +536,11 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 		if registered {
 			log.Infow("SIP inbound REGISTER verified, accepting INVITE without digest challenge",
 				"registrar", r.RegisterAddr,
-				"authUser", r.Username,
+				"authUser", r.Auth.Username,
 			)
 			break
 		}
-		if ok, challenge := s.handleInviteAuth(tid, log, req, tx, from.User, r.Username, r.Password); !ok {
+		if ok, challenge := s.handleInviteAuth(tid, log, req, tx, from.User, r.Auth); !ok {
 			// Store (call-ID + from tag) to (to tag) mapping
 			s.cmu.Lock()
 			s.provisionalInvites.Add([2]string{cc.SIPCallID(), string(cc.Tag())}, cc.ID())
@@ -1086,16 +1089,17 @@ func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, mconf *sipM
 	logSignalChanges := false
 	logSignalChanges, _ = strconv.ParseBool(featureFlags[signalLoggingFeatureFlag])
 	mp, err := NewMediaPort(tid, c.log(), c.mon, &MediaOptions{
-		IP:                  c.s.sconf.MediaIP,
-		BindIP:              c.s.sconf.SignalingIPLocal,
-		Ports:               conf.RTPPort,
-		MediaTimeoutInitial: c.s.conf.MediaTimeoutInitial,
-		MediaTimeout:        mconf.MediaTimeout,
-		SymmetricRTP:        conf.SymmetricRTP,
-		EnableJitterBuffer:  c.jitterBuf,
-		LogSignalChanges:    logSignalChanges,
-		Stats:               &c.stats.Port,
-		NoInputResample:     !RoomResample,
+		IP:                   c.s.sconf.MediaIP,
+		BindIP:               c.s.sconf.SignalingIPLocal,
+		Ports:                conf.RTPPort,
+		MediaTimeoutInitial:  c.s.conf.MediaTimeoutInitial,
+		MediaTimeout:         mconf.MediaTimeout,
+		SymmetricRTP:         conf.SymmetricRTP,
+		IgnoreLocalAddrInSDP: c.s.conf.IgnoreLocalAddrInSDP,
+		EnableJitterBuffer:   c.jitterBuf,
+		LogSignalChanges:     logSignalChanges,
+		Stats:                &c.stats.Port,
+		NoInputResample:      !RoomResample,
 	}, RoomSampleRate)
 	if err != nil {
 		return nil, err

@@ -61,7 +61,7 @@ func (s *Service) enrichRegisterFromInboundTrunkMetadata(ctx context.Context, in
 		info.RegisterTr = tr
 	}
 	if user := strings.TrimSpace(meta.AuthUser); user != "" {
-		info.Username = user
+		info.Auth.Username = user
 	}
 	return info
 }
