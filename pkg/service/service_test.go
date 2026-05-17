@@ -100,6 +100,17 @@ func TestOnSessionEndDeletesOutboundTrunkForForbiddenFailures(t *testing.T) {
 	}
 }
 
+func TestOnSessionEndDeletesOutboundTrunkForSIPTrunkFailure(t *testing.T) {
+	deleter := &fakeSIPTrunkClient{}
+	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
+	callInfo := outboundCallInfoWithError("sip request timed out")
+	callInfo.DisconnectReason = livekit.DisconnectReason_SIP_TRUNK_FAILURE
+
+	svc.OnSessionEnd(context.Background(), nil, callInfo, "request-timeout")
+
+	require.Equal(t, []string{"ST_test"}, deleter.deleted)
+}
+
 func TestOnSessionEndDoesNotDeleteOutboundTrunkForNormalFailures(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -518,24 +518,26 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 	} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
 		status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
 		reportErr = nil
-	} else if c.inviteTimedOutAfterRemoteProgress(err) {
-		status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
-		reportErr = nil
+	} else if c.inviteTimedOut(err) {
+		if c.hasRemoteInviteProgress() {
+			status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
+			reportErr = nil
+		} else {
+			status, term, reason = callDropped, stats.ServerError("request-timeout"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+		}
 	}
 	return reportErr, status, term, reason
 }
 
-func (c *outboundCall) inviteTimedOutAfterRemoteProgress(err error) bool {
-	if err == nil || c == nil {
-		return false
-	}
-	if c.sigTs.TryingTime.IsZero() && c.sigTs.RingingTime.IsZero() {
-		return false
-	}
+func (c *outboundCall) inviteTimedOut(err error) bool {
 	var psrpcErr psrpc.Error
 	return errors.As(err, &psrpcErr) &&
 		psrpcErr.Code() == psrpc.Canceled &&
 		strings.Contains(err.Error(), "sip request timed out")
+}
+
+func (c *outboundCall) hasRemoteInviteProgress() bool {
+	return c != nil && (!c.sigTs.TryingTime.IsZero() || !c.sigTs.RingingTime.IsZero())
 }
 
 func (c *outboundCall) connectToRoom(ctx context.Context, lkNew RoomConfig, getRoom GetRoomFunc) error {

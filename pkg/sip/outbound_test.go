@@ -104,6 +104,20 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, uiscom.DefaultG711Only)
 	require.False(t, ShouldDeleteOutboundTrunkAfterCall("pbx.uiscom.ru:5060"))
 
+	plusofon := outboundProviderProfileForAddress("160907.voice.plusofon.ru:5060")
+	require.Equal(t, "plusofon", plusofon.ID)
+	require.False(t, plusofon.SkipRegistrationInAuto)
+	require.True(t, plusofon.AllowRegisteredInviteDirectFallback)
+	require.False(t, plusofon.DeleteTrunkAfterCall)
+	require.True(t, plusofon.DefaultG711Only)
+
+	megapbx := outboundProviderProfileForAddress("company.megapbx.ru:5060")
+	require.Equal(t, "megapbx", megapbx.ID)
+	require.False(t, megapbx.SkipRegistrationInAuto)
+	require.True(t, megapbx.AllowRegisteredInviteDirectFallback)
+	require.False(t, megapbx.DeleteTrunkAfterCall)
+	require.True(t, megapbx.DefaultG711Only)
+
 	mtt := outboundProviderProfileForAddress("mtt.ru:5060")
 	require.Equal(t, "mtt", mtt.ID)
 	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
@@ -125,29 +139,45 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.Equal(t, "universal", nearMiss.ID)
 }
 
-func TestOutboundProviderMediaProfileRestrictsUiscomDefaultsToG711(t *testing.T) {
-	reqMedia := &livekit.SIPMediaConfig{}
-	mconf, err := newMediaConfig(reqMedia, 0)
-	require.NoError(t, err)
-	require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
-	require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
-	require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+func TestOutboundProviderMediaProfileRestrictsProviderDefaultsToG711(t *testing.T) {
+	for _, address := range []string{
+		"pbx.uiscom.ru:5060",
+		"160907.voice.plusofon.ru:5060",
+		"company.megapbx.ru:5060",
+	} {
+		t.Run(address, func(t *testing.T) {
+			reqMedia := &livekit.SIPMediaConfig{}
+			mconf, err := newMediaConfig(reqMedia, 0)
+			require.NoError(t, err)
+			require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
+			require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
+			require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
 
-	mconf = applyOutboundProviderMediaProfile("pbx.uiscom.ru:5060", reqMedia, mconf)
-	require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
-	require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
-	require.False(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+			mconf = applyOutboundProviderMediaProfile(address, reqMedia, mconf)
+			require.True(t, mconf.Codecs.IsEnabledByName(g711.ALawSDPName))
+			require.True(t, mconf.Codecs.IsEnabledByName(g711.ULawSDPName))
+			require.False(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+		})
+	}
 }
 
 func TestOutboundProviderMediaProfileKeepsExplicitCodecs(t *testing.T) {
-	reqMedia := &livekit.SIPMediaConfig{
-		Codecs: []*livekit.SIPCodec{{Name: "G722", Rate: 8000}},
-	}
-	mconf, err := newMediaConfig(reqMedia, 0)
-	require.NoError(t, err)
+	for _, address := range []string{
+		"pbx.uiscom.ru:5060",
+		"160907.voice.plusofon.ru:5060",
+		"company.megapbx.ru:5060",
+	} {
+		t.Run(address, func(t *testing.T) {
+			reqMedia := &livekit.SIPMediaConfig{
+				Codecs: []*livekit.SIPCodec{{Name: "G722", Rate: 8000}},
+			}
+			mconf, err := newMediaConfig(reqMedia, 0)
+			require.NoError(t, err)
 
-	mconf = applyOutboundProviderMediaProfile("pbx.uiscom.ru:5060", reqMedia, mconf)
-	require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+			mconf = applyOutboundProviderMediaProfile(address, reqMedia, mconf)
+			require.True(t, mconf.Codecs.IsEnabledByName(g722.SDPName))
+		})
+	}
 }
 
 func TestOutboundConnectErrorClassifiesInviteTimeoutAfterProgress(t *testing.T) {
@@ -162,15 +192,15 @@ func TestOutboundConnectErrorClassifiesInviteTimeoutAfterProgress(t *testing.T) 
 	require.Equal(t, livekit.DisconnectReason_USER_UNAVAILABLE, reason)
 }
 
-func TestOutboundConnectErrorKeepsInviteTimeoutBeforeProgressAsServerError(t *testing.T) {
+func TestOutboundConnectErrorClassifiesInviteTimeoutBeforeProgressAsTrunkFailure(t *testing.T) {
 	call := &outboundCall{}
 	err := psrpc.NewErrorf(psrpc.Canceled, "sip request timed out")
 	reportErr, status, term, reason := call.classifySIPConnectError(err)
 
 	require.ErrorIs(t, reportErr, err)
 	require.Equal(t, callDropped, status)
-	require.Equal(t, stats.ServerError("invite-failed"), term)
-	require.Equal(t, livekit.DisconnectReason_UNKNOWN_REASON, reason)
+	require.Equal(t, stats.ServerError("request-timeout"), term)
+	require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
 }
 
 func TestOutboundConnectErrorClassifiesForbiddenAsTrunkFailure(t *testing.T) {

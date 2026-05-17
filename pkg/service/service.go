@@ -296,6 +296,8 @@ func (s *Service) OnSessionEnd(ctx context.Context, callIdentifier *sip.CallIden
 		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "auth failure")
 	case isOutboundTrunkForbiddenFailure(callInfo, reason):
 		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "forbidden")
+	case isOutboundTrunkFailure(callInfo):
+		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "trunk failure")
 	case sip.ShouldDeleteOutboundTrunkAfterCall(callInfo.GetToUri().GetHost()):
 		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "provider configured")
 	default:
@@ -344,4 +346,8 @@ func isOutboundTrunkForbiddenFailure(callInfo *livekit.SIPCallInfo, reason strin
 		return true
 	}
 	return strings.Contains(callInfo.GetError(), "sip status: 403: Forbidden")
+}
+
+func isOutboundTrunkFailure(callInfo *livekit.SIPCallInfo) bool {
+	return callInfo.GetDisconnectReason() == livekit.DisconnectReason_SIP_TRUNK_FAILURE
 }

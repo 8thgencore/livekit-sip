@@ -30,6 +30,16 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		AllowRegisteredInviteDirectFallback: true,
 		DefaultG711Only:                     true,
 	},
+	"plusofon.ru": {
+		ID:                                  "plusofon",
+		AllowRegisteredInviteDirectFallback: true,
+		DefaultG711Only:                     true,
+	},
+	"megapbx.ru": {
+		ID:                                  "megapbx",
+		AllowRegisteredInviteDirectFallback: true,
+		DefaultG711Only:                     true,
+	},
 	"mtt.ru": {
 		ID:                                  "mtt",
 		AllowRegisteredInviteDirectFallback: true,
