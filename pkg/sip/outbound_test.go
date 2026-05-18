@@ -110,6 +110,8 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, plusofon.AllowRegisteredInviteDirectFallback)
 	require.False(t, plusofon.DeleteTrunkAfterCall)
 	require.True(t, plusofon.DefaultG711Only)
+	require.Equal(t, outboundProviderQueueScopeTrunk, plusofon.OutboundQueueScope)
+	require.Equal(t, 1, plusofon.OutboundMaxConcurrentCalls)
 
 	megapbx := outboundProviderProfileForAddress("company.megapbx.ru:5060")
 	require.Equal(t, "megapbx", megapbx.ID)
@@ -127,6 +129,8 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.False(t, sipuni.SkipRegistrationInAuto)
 	require.True(t, sipuni.AllowRegisteredInviteDirectFallback)
 	require.True(t, sipuni.DeleteTrunkAfterCall)
+	require.Equal(t, outboundProviderQueueScopeProviderFrom, sipuni.OutboundQueueScope)
+	require.Equal(t, 1, sipuni.OutboundMaxConcurrentCalls)
 	require.True(t, ShouldDeleteOutboundTrunkAfterCall("voip.sipuni.ru:5060"))
 
 	unknown := outboundProviderProfileForAddress("sip.unknown.example:5060")
@@ -134,6 +138,8 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.False(t, unknown.SkipRegistrationInAuto)
 	require.True(t, unknown.AllowRegisteredInviteDirectFallback)
 	require.False(t, unknown.DeleteTrunkAfterCall)
+	require.Equal(t, outboundProviderQueueScopeTrunk, unknown.OutboundQueueScope)
+	require.Equal(t, 1, unknown.OutboundMaxConcurrentCalls)
 
 	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
 	require.Equal(t, "universal", nearMiss.ID)
@@ -214,6 +220,75 @@ func TestOutboundConnectErrorClassifiesForbiddenAsTrunkFailure(t *testing.T) {
 	require.ErrorIs(t, reportErr, err)
 	require.Equal(t, callDropped, status)
 	require.Equal(t, stats.ServerError("forbidden"), term)
+	require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
+}
+
+func TestOutboundConnectErrorClassifiesNotFoundAsUserUnavailable(t *testing.T) {
+	call := &outboundCall{}
+	err := fmt.Errorf("invite failed: %w", &livekit.SIPStatus{
+		Code:   livekit.SIPStatusCode_SIP_STATUS_NOTFOUND,
+		Status: "Not Found",
+	})
+	reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+	require.NoError(t, reportErr)
+	require.Equal(t, callUnavailable, status)
+	require.Equal(t, stats.ClientError("not-found"), term)
+	require.Equal(t, livekit.DisconnectReason_USER_UNAVAILABLE, reason)
+}
+
+func TestOutboundConnectErrorClassifiesDeclinedAsUserRejected(t *testing.T) {
+	call := &outboundCall{}
+	err := fmt.Errorf("invite failed: %w", &livekit.SIPStatus{
+		Code:   livekit.SIPStatusCode_SIP_STATUS_GLOBAL_DECLINE,
+		Status: "Endpoint Not Available",
+	})
+	reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+	require.NoError(t, reportErr)
+	require.Equal(t, callRejected, status)
+	require.Equal(t, stats.ClientError("declined"), term)
+	require.Equal(t, livekit.DisconnectReason_USER_REJECTED, reason)
+}
+
+func TestOutboundConnectErrorClassifiesServerFailuresAsTrunkFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   livekit.SIPStatusCode
+		reason string
+		want   stats.Termination
+	}{
+		{name: "internal server error", code: livekit.SIPStatusCode_SIP_STATUS_INTERNAL_SERVER_ERROR, reason: "Server Internal Error", want: stats.ServerError("internal-server-error")},
+		{name: "bad gateway", code: livekit.SIPStatusCode_SIP_STATUS_BAD_GATEWAY, reason: "Bad Gateway", want: stats.ServerError("bad-gateway")},
+		{name: "service unavailable", code: livekit.SIPStatusCode_SIP_STATUS_SERVICE_UNAVAILABLE, reason: "Service Unavailable", want: stats.ServerError("service-unavailable")},
+		{name: "generic 5xx", code: livekit.SIPStatusCode(599), reason: "Server Error", want: stats.ServerError("sip-5xx")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &outboundCall{}
+			err := fmt.Errorf("invite failed: %w", &livekit.SIPStatus{
+				Code:   tt.code,
+				Status: tt.reason,
+			})
+			reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+			require.ErrorIs(t, reportErr, err)
+			require.Equal(t, callDropped, status)
+			require.Equal(t, tt.want, term)
+			require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
+		})
+	}
+}
+
+func TestOutboundConnectErrorClassifiesAuthRetryExhaustedAsTrunkFailure(t *testing.T) {
+	call := &outboundCall{}
+	err := fmt.Errorf("max auth retry attempts reached for SIP invite")
+	reportErr, status, term, reason := call.classifySIPConnectError(err)
+
+	require.ErrorIs(t, reportErr, err)
+	require.Equal(t, callDropped, status)
+	require.Equal(t, stats.ServerError("auth-retry-exhausted"), term)
 	require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
 }
 

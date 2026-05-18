@@ -343,19 +343,22 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 	}
 	log.Infow("Creating SIP participant")
 	trunkKey := outboundTrunkQueueKey(req)
+	trunkMaxConcurrentCalls := outboundTrunkQueueMaxConcurrentCalls(req)
 	queueStatus := c.trunkQueues.Status(trunkKey)
 	log.Infow("waiting for outbound trunk slot",
 		"trunkKey", trunkKey,
+		"maxConcurrent", trunkMaxConcurrentCalls,
 		"queued", queueStatus.Waiting,
 		"active", queueStatus.Running,
 		"acquired", false,
 	)
 	queueStart := time.Now()
-	releaseTrunkSlot, err := c.trunkQueues.Acquire(ctx, trunkKey)
+	releaseTrunkSlot, err := c.trunkQueues.Acquire(ctx, trunkKey, trunkMaxConcurrentCalls)
 	if err != nil {
 		queueStatus = c.trunkQueues.Status(trunkKey)
 		log.Warnw("failed to acquire outbound trunk slot", err,
 			"trunkKey", trunkKey,
+			"maxConcurrent", trunkMaxConcurrentCalls,
 			"queueWaitMs", time.Since(queueStart).Milliseconds(),
 			"queued", queueStatus.Waiting,
 			"active", queueStatus.Running,
@@ -366,6 +369,7 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 	queueStatus = c.trunkQueues.Status(trunkKey)
 	log.Infow("acquired outbound trunk slot",
 		"trunkKey", trunkKey,
+		"maxConcurrent", trunkMaxConcurrentCalls,
 		"queueWaitMs", time.Since(queueStart).Milliseconds(),
 		"queued", queueStatus.Waiting,
 		"active", queueStatus.Running,

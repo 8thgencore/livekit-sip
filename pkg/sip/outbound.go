@@ -491,6 +491,9 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 		switch int(e.Code) {
 		case int(sip.StatusForbidden):
 			status, term, reason = callDropped, stats.ServerError("forbidden"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+		case int(sip.StatusNotFound):
+			status, term, reason = callUnavailable, stats.ClientError("not-found"), livekit.DisconnectReason_USER_UNAVAILABLE
+			reportErr = nil
 		case int(sip.StatusRequestTerminated):
 			status, term, reason = callRejected, stats.ClientError("request-terminated"), livekit.DisconnectReason_USER_REJECTED
 			reportErr = nil
@@ -503,6 +506,19 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 		case int(sip.StatusBusyHere):
 			status, term, reason = callRejected, stats.ClientError("busy"), livekit.DisconnectReason_USER_REJECTED
 			reportErr = nil
+		case int(sip.StatusGlobalDecline):
+			status, term, reason = callRejected, stats.ClientError("declined"), livekit.DisconnectReason_USER_REJECTED
+			reportErr = nil
+		case int(sip.StatusInternalServerError):
+			status, term, reason = callDropped, stats.ServerError("internal-server-error"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+		case int(sip.StatusBadGateway):
+			status, term, reason = callDropped, stats.ServerError("bad-gateway"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+		case int(sip.StatusServiceUnavailable):
+			status, term, reason = callDropped, stats.ServerError("service-unavailable"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+		default:
+			if e.Code >= 500 && e.Code < 600 {
+				status, term, reason = callDropped, stats.ServerError("sip-5xx"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
+			}
 		}
 	} else if e := (SDPError{}); errors.As(err, &e) {
 		status, reason = callRejected, livekit.DisconnectReason_MEDIA_FAILURE
@@ -518,6 +534,8 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 	} else if e := (providerAuthConfigError{}); errors.As(err, &e) {
 		status, term, reason = callRejected, stats.ClientError("provider-auth"), livekit.DisconnectReason_UNKNOWN_REASON
 		reportErr = nil
+	} else if isOutboundInviteAuthRetryExhausted(err) {
+		status, term, reason = callDropped, stats.ServerError("auth-retry-exhausted"), livekit.DisconnectReason_SIP_TRUNK_FAILURE
 	} else if c.inviteTimedOut(err) {
 		if c.hasRemoteInviteProgress() {
 			status, term, reason = callUnavailable, stats.ClientError("request-timeout"), livekit.DisconnectReason_USER_UNAVAILABLE
@@ -527,6 +545,10 @@ func (c *outboundCall) classifySIPConnectError(err error) (error, CallStatus, st
 		}
 	}
 	return reportErr, status, term, reason
+}
+
+func isOutboundInviteAuthRetryExhausted(err error) bool {
+	return strings.Contains(err.Error(), "max auth retry attempts reached for SIP invite")
 }
 
 func (c *outboundCall) inviteTimedOut(err error) bool {

@@ -12,11 +12,22 @@ type outboundProviderProfile struct {
 	DirectAuthFailureIsConfigError      bool
 	DeleteTrunkAfterCall                bool
 	DefaultG711Only                     bool
+	OutboundQueueScope                  outboundProviderQueueScope
+	OutboundMaxConcurrentCalls          int
 }
+
+type outboundProviderQueueScope string
+
+const (
+	outboundProviderQueueScopeTrunk        outboundProviderQueueScope = "trunk"
+	outboundProviderQueueScopeProviderFrom outboundProviderQueueScope = "provider_from"
+)
 
 var universalOutboundProviderProfile = outboundProviderProfile{
 	ID:                                  "universal",
 	AllowRegisteredInviteDirectFallback: true,
+	OutboundQueueScope:                  outboundProviderQueueScopeTrunk,
+	OutboundMaxConcurrentCalls:          outboundPerTrunkMaxConcurrentCalls,
 }
 
 var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
@@ -52,6 +63,8 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		ID:                                  "sipuni",
 		AllowRegisteredInviteDirectFallback: true,
 		DeleteTrunkAfterCall:                true,
+		OutboundQueueScope:                  outboundProviderQueueScopeProviderFrom,
+		OutboundMaxConcurrentCalls:          1,
 	},
 }
 
@@ -59,10 +72,22 @@ func outboundProviderProfileForAddress(address string) outboundProviderProfile {
 	host := normalizeSIPHost(address)
 	for domain, profile := range outboundProviderDomainProfiles {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
+			profile.applyDefaults()
 			return profile
 		}
 	}
-	return universalOutboundProviderProfile
+	profile := universalOutboundProviderProfile
+	profile.applyDefaults()
+	return profile
+}
+
+func (p *outboundProviderProfile) applyDefaults() {
+	if p.OutboundQueueScope == "" {
+		p.OutboundQueueScope = outboundProviderQueueScopeTrunk
+	}
+	if p.OutboundMaxConcurrentCalls <= 0 {
+		p.OutboundMaxConcurrentCalls = outboundPerTrunkMaxConcurrentCalls
+	}
 }
 
 func ShouldDeleteOutboundTrunkAfterCall(address string) bool {

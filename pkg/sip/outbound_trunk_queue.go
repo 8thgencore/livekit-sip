@@ -29,10 +29,11 @@ type outboundTrunkQueueStatus struct {
 }
 
 type outboundTrunkQueue struct {
-	running   int
-	lastStart time.Time
-	waiters   []*outboundTrunkQueueWaiter
-	timer     *time.Timer
+	running       int
+	maxConcurrent int
+	lastStart     time.Time
+	waiters       []*outboundTrunkQueueWaiter
+	timer         *time.Timer
 }
 
 type outboundTrunkQueueWaiter struct {
@@ -47,15 +48,27 @@ func newOutboundTrunkQueueManager(mon *stats.Monitor) *outboundTrunkQueueManager
 }
 
 func outboundTrunkQueueKey(req *rpc.InternalCreateSIPParticipantRequest) string {
+	providerProfile := outboundProviderProfileForAddress(req.GetAddress())
+	if providerProfile.OutboundQueueScope == outboundProviderQueueScopeProviderFrom {
+		return fmt.Sprintf("provider:%s|from:%s", providerProfile.ID, req.GetNumber())
+	}
 	if req.GetSipTrunkId() != "" {
 		return "id:" + req.GetSipTrunkId()
 	}
 	return fmt.Sprintf("addr:%s|from:%s", req.GetAddress(), req.GetNumber())
 }
 
-func (m *outboundTrunkQueueManager) Acquire(ctx context.Context, key string) (func(), error) {
+func outboundTrunkQueueMaxConcurrentCalls(req *rpc.InternalCreateSIPParticipantRequest) int {
+	return outboundProviderProfileForAddress(req.GetAddress()).OutboundMaxConcurrentCalls
+}
+
+func (m *outboundTrunkQueueManager) Acquire(ctx context.Context, key string, maxConcurrent ...int) (func(), error) {
+	maxCalls := outboundPerTrunkMaxConcurrentCalls
+	if len(maxConcurrent) > 0 && maxConcurrent[0] > 0 {
+		maxCalls = maxConcurrent[0]
+	}
 	m.mu.Lock()
-	q := m.getOrCreateQueueLocked(key)
+	q := m.getOrCreateQueueLocked(key, maxCalls)
 	if len(q.waiters) >= outboundPerTrunkMaxQueuedCalls {
 		if m.mon != nil {
 			m.mon.TrunkQueueRejected(key)
@@ -151,17 +164,26 @@ func (m *outboundTrunkQueueManager) Stop() {
 	}
 }
 
-func (m *outboundTrunkQueueManager) getOrCreateQueueLocked(key string) *outboundTrunkQueue {
+func (m *outboundTrunkQueueManager) getOrCreateQueueLocked(key string, maxConcurrent int) *outboundTrunkQueue {
+	if maxConcurrent <= 0 {
+		maxConcurrent = outboundPerTrunkMaxConcurrentCalls
+	}
 	q := m.trunks[key]
 	if q == nil {
-		q = &outboundTrunkQueue{}
+		q = &outboundTrunkQueue{maxConcurrent: maxConcurrent}
 		m.trunks[key] = q
+	} else if q.maxConcurrent <= 0 {
+		q.maxConcurrent = maxConcurrent
 	}
 	return q
 }
 
 func (m *outboundTrunkQueueManager) scheduleLocked(q *outboundTrunkQueue) {
-	if q.running >= outboundPerTrunkMaxConcurrentCalls || len(q.waiters) == 0 {
+	maxConcurrent := q.maxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = outboundPerTrunkMaxConcurrentCalls
+	}
+	if q.running >= maxConcurrent || len(q.waiters) == 0 {
 		if q.timer != nil {
 			q.timer.Stop()
 			q.timer = nil
