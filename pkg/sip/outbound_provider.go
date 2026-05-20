@@ -31,10 +31,21 @@ var universalOutboundProviderProfile = outboundProviderProfile{
 }
 
 var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
+	"telphin.ru": {
+		ID:                                  "telphin",
+		AllowRegisteredInviteDirectFallback: true,
+		DefaultG711Only:                     true,
+	},
+	"telphin.com": {
+		ID:                                  "telphin",
+		AllowRegisteredInviteDirectFallback: true,
+		DefaultG711Only:                     true,
+	},
 	"novofon.ru": {
 		ID:                             "novofon",
 		SkipRegistrationInAuto:         true,
 		DirectAuthFailureIsConfigError: true,
+		DefaultG711Only:                true,
 	},
 	"uiscom.ru": {
 		ID:                                  "uiscom",
@@ -54,6 +65,7 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 	"mtt.ru": {
 		ID:                                  "mtt",
 		AllowRegisteredInviteDirectFallback: true,
+		DefaultG711Only:                     true,
 	},
 	"mangosip.ru": {
 		ID:                                  "mangosip",
@@ -63,6 +75,7 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		ID:                                  "sipuni",
 		AllowRegisteredInviteDirectFallback: true,
 		DeleteTrunkAfterCall:                true,
+		DefaultG711Only:                     true,
 		OutboundQueueScope:                  outboundProviderQueueScopeProviderFrom,
 		OutboundMaxConcurrentCalls:          1,
 	},

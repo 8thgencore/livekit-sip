@@ -58,6 +58,7 @@ type ResolvedRegistrationConfig struct {
 	AuthUsername              string
 	ContactUser               string
 	FromDomain                string
+	RouteHeaders              []string
 	Transport                 Transport
 	Expires                   time.Duration
 	RefreshBefore             time.Duration
@@ -335,6 +336,7 @@ func (c *ResolvedRegistrationConfig) cacheKey() string {
 		c.ContactUser,
 		c.FromDomain,
 		c.AuthURI,
+		strings.Join(c.RouteHeaders, ","),
 	}, "|")
 }
 
@@ -379,6 +381,7 @@ func resolveRegistrationConfig(sipConf sipOutboundConfig) (*ResolvedRegistration
 		AuthUsername:              sipConf.user,
 		ContactUser:               sipConf.user,
 		FromDomain:                sipConf.host,
+		RouteHeaders:              appendRouteHeaders(sipConf.routeHeaders, routeHeadersFromHeaderMap(sipConf.headers)),
 		AlwaysRefreshBeforeInvite: false,
 	}
 	if conf.Transport == "" {
@@ -407,12 +410,11 @@ func resolveRegistrationConfig(sipConf sipOutboundConfig) (*ResolvedRegistration
 func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig, password string, contact URI) (time.Duration, error) {
 	callID := sip.CallIDHeader(guid.New("reg_"))
 	fromTag := sip.GenerateTagN(16)
-	authHeaderName := ""
-	authHeaderValue := ""
+	authHeaders := make(map[string]string)
 	cacheKey := conf.cacheKey()
 
 	for attempt := 0; attempt < registerAuthMaxAttempts; attempt++ {
-		req := c.newRegisterRequest(conf, contact, fromTag, uint32(attempt+1), callID, authHeaderName, authHeaderValue)
+		req := c.newRegisterRequest(conf, contact, fromTag, uint32(attempt+1), callID, authHeaders)
 		c.log.Infow("sending SIP REGISTER",
 			"attempt", attempt+1,
 			"registrar", conf.Registrar.GetDest(),
@@ -422,7 +424,8 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 			"authURI", conf.AuthURI,
 			"transport", conf.Transport,
 			"expiresSec", int(conf.Expires/time.Second),
-			"hasAuthorization", authHeaderValue != "",
+			"hasAuthorization", authHeaders["Authorization"] != "",
+			"hasProxyAuthorization", authHeaders["Proxy-Authorization"] != "",
 		)
 		tx, err := c.sipCli.TransactionRequest(req)
 		if err != nil {
@@ -449,6 +452,8 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 			"reason", resp.Reason,
 		)
 
+		authHeaderName := ""
+		authHeaderRespName := ""
 		switch resp.StatusCode {
 		case sip.StatusOK:
 			expires := registrationExpires(resp, conf.Expires)
@@ -459,9 +464,11 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 			)
 			return expires, nil
 		case sip.StatusUnauthorized:
-			authHeaderName = "Authorization"
+			authHeaderName = "WWW-Authenticate"
+			authHeaderRespName = "Authorization"
 		case sip.StatusProxyAuthRequired:
-			authHeaderName = "Proxy-Authorization"
+			authHeaderName = "Proxy-Authenticate"
+			authHeaderRespName = "Proxy-Authorization"
 		case sip.StatusForbidden, sip.StatusNotFound, sip.StatusMethodNotAllowed, sip.StatusNotImplemented:
 			c.log.Warnw("SIP REGISTER rejected", nil,
 				"registrar", conf.Registrar.GetDest(),
@@ -484,29 +491,34 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 			})
 		}
 
-		challengeHeader := resp.GetHeader(stringsForAuthHeader(authHeaderName))
+		challengeHeader := resp.GetHeader(authHeaderName)
 		if challengeHeader == nil {
 			return 0, psrpc.NewError(psrpc.FailedPrecondition, errors.New("no auth header in sip register response"))
 		}
 		c.log.Infow("SIP REGISTER auth challenge received",
 			"attempt", attempt+1,
 			"registrar", conf.Registrar.GetDest(),
-			"authHeader", authHeaderName,
+			"authChallengeHeader", authHeaderName,
+			"authResponseHeader", authHeaderRespName,
 		)
 		challenge, err := digest.ParseChallenge(challengeHeader.Value())
 		if err != nil {
 			return 0, fmt.Errorf("invalid register challenge %q: %w", challengeHeader.Value(), err)
 		}
+		digestURI := req.Recipient.String()
+		if digestURI == "" {
+			digestURI = conf.AuthURI
+		}
 		cred, err := digest.Digest(challenge, digest.Options{
 			Method:   sip.REGISTER.String(),
-			URI:      conf.AuthURI,
+			URI:      digestURI,
 			Username: conf.AuthUsername,
 			Password: password,
 		})
 		if err != nil {
 			return 0, err
 		}
-		authHeaderValue = cred.String()
+		authHeaders[authHeaderRespName] = cred.String()
 	}
 
 	c.log.Warnw("SIP REGISTER exhausted retry attempts", nil,
@@ -549,7 +561,7 @@ func headerParam(params sip.HeaderParams, name string) (string, bool) {
 	return "", false
 }
 
-func (c *Client) newRegisterRequest(conf *ResolvedRegistrationConfig, contact URI, fromTag string, cseq uint32, callID sip.CallIDHeader, authHeaderName, authHeaderValue string) *sip.Request {
+func (c *Client) newRegisterRequest(conf *ResolvedRegistrationConfig, contact URI, fromTag string, cseq uint32, callID sip.CallIDHeader, authHeaders map[string]string) *sip.Request {
 	registerURI := conf.Registrar.GetURI()
 	aorURI := &sip.Uri{
 		Scheme: "sip",
@@ -570,13 +582,30 @@ func (c *Client) newRegisterRequest(conf *ResolvedRegistrationConfig, contact UR
 	req.AppendHeader(&callID)
 	req.AppendHeader(&sip.CSeqHeader{SeqNo: cseq, MethodName: sip.REGISTER})
 	req.AppendHeader(&maxForwards)
+	prependRouteHeaders(req, conf.RouteHeaders)
 	req.AppendHeader(sip.NewHeader("Expires", strconv.Itoa(int(conf.Expires/time.Second))))
 	req.AppendHeader(sip.NewHeader("User-Agent", UserAgent))
 	req.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE, REGISTER"))
-	if authHeaderName != "" && authHeaderValue != "" {
-		req.AppendHeader(sip.NewHeader(authHeaderName, authHeaderValue))
+	for _, authHeaderName := range []string{"Authorization", "Proxy-Authorization"} {
+		if authHeaderValue := authHeaders[authHeaderName]; authHeaderValue != "" {
+			req.AppendHeader(sip.NewHeader(authHeaderName, authHeaderValue))
+		}
 	}
 	return req
+}
+
+func routeHeadersFromHeaderMap(headers map[string]string) []string {
+	for name, value := range headers {
+		if !strings.EqualFold(name, "Route") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil
+		}
+		return []string{value}
+	}
+	return nil
 }
 
 func parseRegistrationURI(raw string, fallbackTransport Transport) (URI, error) {

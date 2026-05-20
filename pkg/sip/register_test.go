@@ -59,6 +59,149 @@ func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "voip.uiscom.ru:9060",
+			host:    "voip.uiscom.ru",
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+		})
+		done <- err
+	}()
+
+	firstTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, firstTx.req.Method)
+	require.Equal(t, "sip:voip.uiscom.ru:9060;transport=udp", firstTx.req.Recipient.String())
+
+	challenge := digest.Challenge{
+		Realm:     "voip.uiscom.ru",
+		Nonce:     "nonce-uiscom",
+		Algorithm: "MD5",
+		QOP:       []string{"auth"},
+	}
+	unauthorized := sip.NewResponseFromRequest(firstTx.req, sip.StatusUnauthorized, "Unauthorized", nil)
+	unauthorized.AppendHeader(sip.NewHeader("WWW-Authenticate", challenge.String()))
+	require.NoError(t, firstTx.transaction.SendResponse(unauthorized))
+
+	secondTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, secondTx.req.Method)
+	authHeader := secondTx.req.GetHeader("Authorization")
+	require.NotNil(t, authHeader)
+	cred, err := digest.ParseCredentials(authHeader.Value())
+	require.NoError(t, err)
+	require.Equal(t, firstTx.req.Recipient.String(), cred.URI)
+
+	require.NoError(t, secondTx.transaction.SendResponse(sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
+func TestEnsureRegisteredKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "registrar.proxy-auth.example:5060",
+			host:    "proxy-auth.example",
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+		})
+		done <- err
+	}()
+
+	firstTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, firstTx.req.Method)
+	proxyChallenge := digest.Challenge{
+		Realm: "proxy-auth.example",
+		Nonce: "nonce-proxy",
+	}
+	proxyRequired := sip.NewResponseFromRequest(firstTx.req, sip.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
+	proxyRequired.AppendHeader(sip.NewHeader("Proxy-Authenticate", proxyChallenge.String()))
+	require.NoError(t, firstTx.transaction.SendResponse(proxyRequired))
+
+	proxyAuthTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, proxyAuthTx.req.Method)
+	require.NotNil(t, proxyAuthTx.req.GetHeader("Proxy-Authorization"))
+	require.Nil(t, proxyAuthTx.req.GetHeader("Authorization"))
+	wwwChallenge := digest.Challenge{
+		Realm: "proxy-auth.example",
+		Nonce: "nonce-www",
+	}
+	unauthorized := sip.NewResponseFromRequest(proxyAuthTx.req, sip.StatusUnauthorized, "Unauthorized", nil)
+	unauthorized.AppendHeader(sip.NewHeader("WWW-Authenticate", wwwChallenge.String()))
+	require.NoError(t, proxyAuthTx.transaction.SendResponse(unauthorized))
+
+	bothAuthTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, bothAuthTx.req.Method)
+	require.NotNil(t, bothAuthTx.req.GetHeader("Proxy-Authorization"))
+	require.NotNil(t, bothAuthTx.req.GetHeader("Authorization"))
+	require.NoError(t, bothAuthTx.transaction.SendResponse(sip.NewResponseFromRequest(bothAuthTx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
+func TestEnsureRegisteredAddsRouteHeader(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: mockRegistrarHost + ":5060",
+			host:    "sip.telphin.com",
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+			headers: map[string]string{
+				"Route": "<sip:sipproxy.telphin.ru:5068;lr>",
+			},
+		})
+		done <- err
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	routeHeaders := tx.req.GetHeaders("Route")
+	require.Len(t, routeHeaders, 1)
+	require.Equal(t, "<sip:sipproxy.telphin.ru:5068;lr>", routeHeaders[0].Value())
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
+func TestEnsureRegisteredAddsConfiguredRouteHeadersInOrder(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	routes := []string{
+		"<sip:edge-1.example.com;lr>",
+		"<sip:edge-2.example.com;lr>",
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address:      mockRegistrarHost + ":5060",
+			host:         "sip.telphin.com",
+			user:         mockAuthUser,
+			pass:         mockAuthPassword,
+			routeHeaders: routes,
+		})
+		done <- err
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	routeHeaders := tx.req.GetHeaders("Route")
+	require.Len(t, routeHeaders, 2)
+	require.Equal(t, routes[0], routeHeaders[0].Value())
+	require.Equal(t, routes[1], routeHeaders[1].Value())
+	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-done)
+}
+
 func TestEnsureRegisteredWithoutCredentialsSkipsRegister(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

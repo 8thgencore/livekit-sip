@@ -87,10 +87,21 @@ func sendTestResponse(t *testing.T, tx *transactionRequest, resp *sip.Response) 
 }
 
 func TestOutboundProviderProfileResolution(t *testing.T) {
+	telphin := outboundProviderProfileForAddress("teleo.telphin.ru:5068")
+	require.Equal(t, "telphin", telphin.ID)
+	require.False(t, telphin.SkipRegistrationInAuto)
+	require.True(t, telphin.AllowRegisteredInviteDirectFallback)
+	require.True(t, telphin.DefaultG711Only)
+
+	telphinSIP := outboundProviderProfileForAddress("vip1.sip.telphin.com:5060")
+	require.Equal(t, "telphin", telphinSIP.ID)
+	require.True(t, telphinSIP.DefaultG711Only)
+
 	novofon := outboundProviderProfileForAddress("SIP.NOVOFON.RU:5060")
 	require.Equal(t, "novofon", novofon.ID)
 	require.True(t, novofon.SkipRegistrationInAuto)
 	require.True(t, novofon.DirectAuthFailureIsConfigError)
+	require.True(t, novofon.DefaultG711Only)
 
 	novofonSubdomain := outboundProviderProfileForAddress("proxy.sip.novofon.ru:5060")
 	require.Equal(t, "novofon", novofonSubdomain.ID)
@@ -123,12 +134,14 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	mtt := outboundProviderProfileForAddress("mtt.ru:5060")
 	require.Equal(t, "mtt", mtt.ID)
 	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
+	require.True(t, mtt.DefaultG711Only)
 
 	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
 	require.Equal(t, "sipuni", sipuni.ID)
 	require.False(t, sipuni.SkipRegistrationInAuto)
 	require.True(t, sipuni.AllowRegisteredInviteDirectFallback)
 	require.True(t, sipuni.DeleteTrunkAfterCall)
+	require.True(t, sipuni.DefaultG711Only)
 	require.Equal(t, outboundProviderQueueScopeProviderFrom, sipuni.OutboundQueueScope)
 	require.Equal(t, 1, sipuni.OutboundMaxConcurrentCalls)
 	require.True(t, ShouldDeleteOutboundTrunkAfterCall("voip.sipuni.ru:5060"))
@@ -147,7 +160,12 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 
 func TestOutboundProviderMediaProfileRestrictsProviderDefaultsToG711(t *testing.T) {
 	for _, address := range []string{
+		"teleo.telphin.ru:5068",
+		"vip1.sip.telphin.com:5060",
+		"sip.novofon.ru:5060",
 		"pbx.uiscom.ru:5060",
+		"login.mtt.ru:5060",
+		"voip.sipuni.ru:5060",
 		"160907.voice.plusofon.ru:5060",
 		"company.megapbx.ru:5060",
 	} {
@@ -169,7 +187,12 @@ func TestOutboundProviderMediaProfileRestrictsProviderDefaultsToG711(t *testing.
 
 func TestOutboundProviderMediaProfileKeepsExplicitCodecs(t *testing.T) {
 	for _, address := range []string{
+		"teleo.telphin.ru:5068",
+		"vip1.sip.telphin.com:5060",
+		"sip.novofon.ru:5060",
 		"pbx.uiscom.ru:5060",
+		"login.mtt.ru:5060",
+		"voip.sipuni.ru:5060",
 		"160907.voice.plusofon.ru:5060",
 		"company.megapbx.ru:5060",
 	} {
@@ -454,7 +477,7 @@ func TestOutboundInviteWaitsBrieflyAfterFreshRegister(t *testing.T) {
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil))
 
 	select {
 	case tx := <-sipClient.transactions:
@@ -511,7 +534,7 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 
 			registerTx := waitTransactionWithTimeout(t, sipClient, 3*time.Second)
 			require.Equal(t, sip.REGISTER, registerTx.req.Method)
-			require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)))
+			sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil))
 
 			res := <-done
 			require.NoError(t, res.err)
@@ -553,7 +576,7 @@ func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 		}},
 	}})
 	resp.AppendHeader(sip.NewHeader("WWW-Authenticate", challenge.String()))
-	require.NoError(t, firstInvite.transaction.SendResponse(resp))
+	sendTestResponse(t, firstInvite, resp)
 
 	authInvite := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, authInvite.req.Method)
@@ -564,7 +587,48 @@ func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 	require.Equal(t, firstInvite.req.Recipient.String(), cred.URI)
 	require.Equal(t, "sip:+79998887722@login.test.com:5060;transport=udp", cred.URI)
 
-	require.NoError(t, authInvite.transaction.SendResponse(sip.NewResponseFromRequest(authInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n"))))
+	sendTestResponse(t, authInvite, sip.NewResponseFromRequest(authInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n")))
+	require.NoError(t, <-result)
+}
+
+func TestOutboundInviteKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	toURI := CreateURIFromUserAndAddress("+79998887722", "proxy.auth.example:5060", TransportUDP)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "123456", "test-password", nil, []byte("v=0\r\n"), nil, nil)
+		result <- err
+	}()
+
+	firstInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, firstInvite.req.Method)
+	require.Nil(t, firstInvite.req.GetHeader("Proxy-Authorization"))
+	sendProxyAuthRequired(t, firstInvite)
+
+	proxyAuthInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, proxyAuthInvite.req.Method)
+	require.NotNil(t, proxyAuthInvite.req.GetHeader("Proxy-Authorization"))
+	require.Nil(t, proxyAuthInvite.req.GetHeader("Authorization"))
+
+	challenge := digest.Challenge{
+		Realm:     "proxy.auth.example",
+		Nonce:     "nonce-www-authenticate",
+		Algorithm: "MD5",
+		QOP:       []string{"auth"},
+	}
+	unauthorized := sip.NewResponseFromRequest(proxyAuthInvite.req, sip.StatusUnauthorized, "Unauthorized", nil)
+	unauthorized.AppendHeader(sip.NewHeader("WWW-Authenticate", challenge.String()))
+	sendTestResponse(t, proxyAuthInvite, unauthorized)
+
+	bothAuthInvite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, bothAuthInvite.req.Method)
+	require.NotNil(t, bothAuthInvite.req.GetHeader("Proxy-Authorization"))
+	require.NotNil(t, bothAuthInvite.req.GetHeader("Authorization"))
+
+	sendTestResponse(t, bothAuthInvite, sip.NewResponseFromRequest(bothAuthInvite.req, sip.StatusOK, "OK", []byte("v=0\r\n")))
 	require.NoError(t, <-result)
 }
 
@@ -590,6 +654,33 @@ func TestOutboundInviteSentCallbackRunsBeforeFinalResponse(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected invite sent callback before final SIP response")
 	}
+
+	sendTestResponse(t, invite, sip.NewResponseFromRequest(invite.req, sip.StatusBusyHere, "Busy Here", nil))
+	require.Error(t, <-result)
+}
+
+func TestOutboundInviteConfiguredRouteHeadersPreserveOrder(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+	outbound := newTestOutboundCall(client)
+	outbound.cc.routeHeaders = []string{
+		"<sip:edge-1.example.com;lr>",
+		"<sip:edge-2.example.com;lr>",
+	}
+	toURI := CreateURIFromUserAndAddress("+79998887722", "login.test.com:5060", TransportUDP)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := outbound.cc.Invite(context.Background(), toURI, nil, "", "", nil, []byte("v=0\r\n"), nil, nil)
+		result <- err
+	}()
+
+	invite := waitTransaction(t, sipClient)
+	require.Equal(t, sip.INVITE, invite.req.Method)
+	routeHeaders := invite.req.GetHeaders("Route")
+	require.Len(t, routeHeaders, 2)
+	require.Equal(t, "<sip:edge-1.example.com;lr>", routeHeaders[0].Value())
+	require.Equal(t, "<sip:edge-2.example.com;lr>", routeHeaders[1].Value())
 
 	sendTestResponse(t, invite, sip.NewResponseFromRequest(invite.req, sip.StatusBusyHere, "Busy Here", nil))
 	require.Error(t, <-result)
@@ -622,7 +713,7 @@ func TestOutboundInviteRequestTerminatedIsClientError(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTerminated, "Request Terminated", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTerminated, "Request Terminated", nil))
 
 	err := <-done
 	require.Error(t, err)
@@ -665,7 +756,7 @@ func TestOutboundInviteRequestTimeoutIsClientError(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTimeout, "Request Timeout", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusRequestTimeout, "Request Timeout", nil))
 
 	err := <-done
 	require.Error(t, err)
@@ -709,7 +800,7 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.True(t, hasTransport)
 	require.NotNil(t, inviteTx.req.Contact())
 	require.Empty(t, inviteTx.req.Contact().Address.User)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 
 	require.Error(t, <-done)
 }
@@ -735,7 +826,7 @@ func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
@@ -759,7 +850,7 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
@@ -831,7 +922,7 @@ func TestOutboundInviteRequiresRegisterWhenConfigured(t *testing.T) {
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
@@ -855,7 +946,7 @@ func TestOutboundInviteRequiredOverridesProviderProfileSkipRegister(t *testing.T
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
@@ -879,7 +970,7 @@ func TestOutboundInviteAutoFallsBackToDirectInviteAfterUniversalRegisterFailure(
 
 	registerTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, registerTx.req.Method)
-	require.NoError(t, registerTx.transaction.SendResponse(sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil))
 
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
@@ -887,7 +978,7 @@ func TestOutboundInviteAutoFallsBackToDirectInviteAfterUniversalRegisterFailure(
 	require.Equal(t, client.sconf.SignalingIP.String(), inviteTx.req.From().Address.Host)
 	require.NotNil(t, inviteTx.req.Contact())
 	require.Empty(t, inviteTx.req.Contact().Address.User)
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
@@ -910,7 +1001,7 @@ func TestOutboundInviteWithoutRegistrationKeepsHostOnlyContact(t *testing.T) {
 	userAgent := inviteTx.req.GetHeader("User-Agent")
 	require.NotNil(t, userAgent)
 	require.Equal(t, UserAgent, userAgent.Value())
-	require.NoError(t, inviteTx.transaction.SendResponse(sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil)))
+	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 
 	require.Error(t, <-done)
 }
@@ -1119,7 +1210,7 @@ func TestOutboundRouteHeaderWithRecordRoute(t *testing.T) {
 	rr2 := sip.RecordRouteHeader{Address: initialRouteURI}
 	response.AppendHeader(&rr1)
 	response.AppendHeader(&rr2)
-	tr.transaction.SendResponse(response)
+	sendTestResponse(t, tr, response)
 
 	t.Log("Wait for ACK to be sent")
 

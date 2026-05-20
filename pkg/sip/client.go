@@ -341,6 +341,9 @@ func (c *Client) createSIPParticipant(ctx context.Context, req *rpc.InternalCrea
 		displayName:     req.DisplayName,
 		registerMode:    outboundRegisterModeFromRequest(req),
 	}
+	if req.FeatureFlags[outboundRouteHeadersFeatureFlag] == "true" {
+		sipConf.routeHeaders = cloneRouteHeaders(c.conf.OutboundRouteHeaders)
+	}
 	log.Infow("Creating SIP participant")
 	trunkKey := outboundTrunkQueueKey(req)
 	trunkMaxConcurrentCalls := outboundTrunkQueueMaxConcurrentCalls(req)

@@ -70,6 +70,7 @@ type sipOutboundConfig struct {
 	mediaConfig     *sipMediaConfig
 	displayName     *string
 	registerMode    outboundRegisterMode
+	routeHeaders    []string
 }
 
 const (
@@ -202,9 +203,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
 	call.cc.directProviderAuthConfigError = providerProfile.DirectAuthFailureIsConfigError &&
 		(sipConf.registerMode == outboundRegisterModeDisabled || sipConf.registerMode == outboundRegisterModeAuto)
-	if sipConf.featureFlags[outboundRouteHeadersFeatureFlag] == "true" {
-		call.cc.routeHeaders = conf.OutboundRouteHeaders
-	}
+	call.cc.routeHeaders = cloneRouteHeaders(sipConf.routeHeaders)
 
 	call.mon = c.mon.NewCall(stats.Outbound, sipConf.host, sipConf.address)
 
@@ -1114,15 +1113,14 @@ func (c *sipOutbound) doInvite(ctx context.Context, to URI, regProfile *Resolved
 	c.log = c.log.WithValues("sipCallID", c.callID)
 
 	var (
-		sipHeaders         Headers
-		authHeader         = ""
-		authHeaderRespName string
-		req                *sip.Request
-		resp               *sip.Response
-		err                error
-		lastAuthStatus     sip.StatusCode
-		lastAuthAddress    string
-		lastAuthFromUser   string
+		sipHeaders       Headers
+		authHeaders      = make(map[string]string)
+		req              *sip.Request
+		resp             *sip.Response
+		err              error
+		lastAuthStatus   sip.StatusCode
+		lastAuthAddress  string
+		lastAuthFromUser string
 	)
 	if keys := maps.Keys(headers); len(keys) != 0 {
 		sort.Strings(keys)
@@ -1143,11 +1141,12 @@ authLoop:
 			}
 			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
 		}
-		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaderRespName, authHeader, sipHeaders, setState, onInviteSent)
+		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaders, sipHeaders, setState, onInviteSent)
 		if err != nil {
 			return nil, err
 		}
 		var authHeaderName string
+		var authHeaderRespName string
 		switch resp.StatusCode {
 		case sip.StatusOK:
 			break authLoop
@@ -1221,7 +1220,7 @@ authLoop:
 			return nil, err
 		}
 		c.log.Infow("SIP INVITE auth response prepared", inviteAuthResponseLogFields(authHeaderRespName, req, cred, digestURI)...)
-		authHeader = cred.String()
+		authHeaders[authHeaderRespName] = cred.String()
 		// Try again with a computed digest
 	}
 	c.invite, c.inviteOk = req, resp
@@ -1307,7 +1306,7 @@ func (c *sipOutbound) AckInviteOK(ctx context.Context) error {
 	return c.c.sipCli.WriteRequest(sip.NewAckRequest(c.invite, c.inviteOk, nil))
 }
 
-func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader, to *sip.ToHeader, offer []byte, authHeaderName, authHeader string, headers Headers, setState sipRespFunc, onInviteSent sipInviteSentFunc) (*sip.Request, *sip.Response, error) {
+func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader, to *sip.ToHeader, offer []byte, authHeaders map[string]string, headers Headers, setState sipRespFunc, onInviteSent sipInviteSentFunc) (*sip.Request, *sip.Response, error) {
 	ctx, span := Tracer.Start(ctx, "sip.outbound.attemptInvite")
 	defer span.End()
 	req := sip.NewRequest(sip.INVITE, to.Address)
@@ -1324,16 +1323,16 @@ func (c *sipOutbound) attemptInvite(ctx context.Context, callID sip.CallIDHeader
 	req.AppendHeader(sip.NewHeader("User-Agent", UserAgent))
 	req.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE"))
 
-	if authHeader != "" {
-		req.AppendHeader(sip.NewHeader(authHeaderName, authHeader))
+	for _, authHeaderName := range []string{"Authorization", "Proxy-Authorization"} {
+		if authHeader := authHeaders[authHeaderName]; authHeader != "" {
+			req.AppendHeader(sip.NewHeader(authHeaderName, authHeader))
+		}
 	}
 	for _, h := range headers {
 		req.AppendHeader(h)
 	}
 
-	for _, route := range c.routeHeaders {
-		req.PrependHeader(sip.NewHeader("Route", route))
-	}
+	prependRouteHeaders(req, c.routeHeaders)
 
 	tx, err := c.c.sipCli.TransactionRequest(req)
 	if err != nil {
