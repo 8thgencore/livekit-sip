@@ -3,7 +3,7 @@ package sip
 import (
 	"testing"
 
-	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/livekit/protocol/livekit"
 	"github.com/stretchr/testify/require"
 
 	"github.com/livekit/sip/pkg/stats"
@@ -12,15 +12,15 @@ import (
 func TestTerminationFromRoomDisconnect(t *testing.T) {
 	tests := []struct {
 		name   string
-		reason lksdk.DisconnectionReason
+		reason livekit.DisconnectReason
 		want   stats.Termination
 	}{
-		{name: "leave requested", reason: lksdk.LeaveRequested, want: stats.Success("removed")},
-		{name: "participant removed", reason: lksdk.ParticipantRemoved, want: stats.Success("removed")},
-		{name: "room closed", reason: lksdk.RoomClosed, want: stats.ServerError("lk-room-ended")},
-		{name: "other reason", reason: lksdk.OtherReason, want: stats.ServerError("lk-room-ended")},
-		{name: "failed", reason: lksdk.Failed, want: stats.ServerError("room-failed")},
-		{name: "user unavailable", reason: lksdk.UserUnavailable, want: stats.ServerError("lk-room-ended")},
+		{name: "client initiated", reason: livekit.DisconnectReason_CLIENT_INITIATED, want: stats.Success("removed")},
+		{name: "participant removed", reason: livekit.DisconnectReason_PARTICIPANT_REMOVED, want: stats.Success("removed")},
+		{name: "room closed", reason: livekit.DisconnectReason_ROOM_CLOSED, want: stats.Success("removed")},
+		{name: "join failure", reason: livekit.DisconnectReason_JOIN_FAILURE, want: stats.ServerError("room-failed")},
+		{name: "user unavailable", reason: livekit.DisconnectReason_USER_UNAVAILABLE, want: stats.ClientError("user-unavailable")},
+		{name: "unknown", reason: livekit.DisconnectReason_UNKNOWN_REASON, want: stats.ServerError("room-disconnected")},
 	}
 
 	for _, tt := range tests {

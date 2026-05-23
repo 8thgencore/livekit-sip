@@ -87,6 +87,16 @@ func (e providerAuthConfigError) Error() string {
 	return fmt.Sprintf("SIP IP trunk rejected INVITE auth with status %d for address %q and from user %q; verify public IP/port binding and outbound caller ID", e.status, e.address, e.fromUser)
 }
 
+func (e providerAuthConfigError) ClassifyInvite() inviteFailure {
+	return inviteFailure{
+		status:    callRejected,
+		term:      stats.ClientError("provider-auth"),
+		reason:    livekit.DisconnectReason_UNKNOWN_REASON,
+		reportErr: nil,
+		returnErr: psrpc.NewError(psrpc.FailedPrecondition, e),
+	}
+}
+
 type outboundCall struct {
 	c             *Client
 	tid           traceid.ID
@@ -466,14 +476,10 @@ func (c *outboundCall) connectSIP(ctx context.Context, tid traceid.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.dialSIP(ctx, tid); err != nil {
-		reportErr, status, term, reason := c.classifySIPConnectError(err)
-		if reportErr == nil {
-			c.log.Infow("SIP call ended with expected SIP status", "error", err)
-		} else {
-			c.log.Warnw("SIP call failed", err)
-		}
-		c.close(ctx, reportErr, status, term, reason)
-		return err
+		c.log.Infow("SIP call failed", "error", err)
+		res := classifyInviteError(err)
+		c.close(ctx, res.reportErr, res.status, res.term, res.reason)
+		return res.returnErr
 	}
 	c.connectMedia()
 	c.started.Break()
@@ -654,7 +660,7 @@ func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan stru
 			_ = tx.Cancel()
 			// NOTE: psrpc.Canceled does not auto-retry, whereas psrpc.DeadlineExceeded does
 			// As long as that is the case, avoid psrpc.DeadlineExceeded to prevent hammering of destination.
-			return nil, psrpc.NewErrorf(psrpc.Canceled, "sip request timed out")
+			return nil, psrpc.NewError(psrpc.Canceled, ErrSIPRequestTimeout)
 		case <-stop:
 			_ = tx.Cancel()
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "service shutting down")
@@ -1139,7 +1145,7 @@ authLoop:
 					status:   lastAuthStatus,
 				})
 			}
-			return nil, psrpc.NewError(psrpc.FailedPrecondition, fmt.Errorf("max auth retry attempts reached for SIP invite"))
+			return nil, psrpc.NewError(psrpc.FailedPrecondition, ErrAuthMaxRetry)
 		}
 		req, resp, err = c.attemptInvite(ctx, sip.CallIDHeader(c.callID), toHeader, sdpOffer, authHeaders, sipHeaders, setState, onInviteSent)
 		if err != nil {
@@ -1197,16 +1203,16 @@ authLoop:
 		lastAuthFromUser = c.from.Address.User
 		// auth required
 		if user == "" || pass == "" {
-			return nil, psrpc.NewError(psrpc.FailedPrecondition, errors.New("sip server required auth, but no username or password was provided"))
+			return nil, psrpc.NewError(psrpc.FailedPrecondition, ErrAuthMissingCreds)
 		}
 		headerVal := resp.GetHeader(authHeaderName)
 		if headerVal == nil {
-			return nil, psrpc.NewError(psrpc.FailedPrecondition, errors.New("no auth header in sip invite response"))
+			return nil, psrpc.NewError(psrpc.FailedPrecondition, ErrAuthNoHeader)
 		}
 		challengeStr := headerVal.Value()
 		challenge, err := digest.ParseChallenge(challengeStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid challenge %q: %w", challengeStr, err)
+			return nil, psrpc.NewErrorf(psrpc.Internal, "invalid challenge %q: %v", challengeStr, err)
 		}
 		c.log.Infow("SIP INVITE auth challenge parsed", inviteAuthChallengeLogFields(resp.StatusCode, authHeaderName, authHeaderRespName, challenge)...)
 		digestURI := req.Recipient.String()
@@ -1226,12 +1232,12 @@ authLoop:
 	c.invite, c.inviteOk = req, resp
 	toHeader = resp.To()
 	if toHeader == nil {
-		return nil, errors.New("no To header in INVITE response")
+		return nil, psrpc.NewErrorf(psrpc.Internal, "no To header in INVITE response")
 	}
 	var ok bool
 	c.tag, ok = getTagFrom(toHeader.Params)
 	if !ok {
-		return nil, errors.New("no tag in To header in INVITE response")
+		return nil, psrpc.NewErrorf(psrpc.Internal, "no tag in To header in INVITE response")
 	}
 
 	if cont := resp.Contact(); cont != nil {
@@ -1301,7 +1307,7 @@ func (c *sipOutbound) AckInviteOK(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.invite == nil || c.inviteOk == nil {
-		return errors.New("call already closed")
+		return psrpc.NewErrorf(psrpc.Canceled, "call already closed")
 	}
 	return c.c.sipCli.WriteRequest(sip.NewAckRequest(c.invite, c.inviteOk, nil))
 }
