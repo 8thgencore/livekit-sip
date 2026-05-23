@@ -717,6 +717,25 @@ func (c *outboundCall) setStatus(v CallStatus) {
 	})
 }
 
+func (c *outboundCall) setFailureStatusAttrs(status *livekit.SIPStatus) {
+	if status == nil || c.lkRoom == nil {
+		return
+	}
+	r := c.lkRoom.Room()
+	if r == nil {
+		return
+	}
+	attrs := map[string]string{
+		livekit.AttrSIPCallStatus: "dialing-error",
+		"sip.statusCode":          strconv.Itoa(int(status.Code)),
+	}
+	if status.Status != "" {
+		attrs["sip.status"] = status.Status
+		attrs["sip.reason"] = status.Status
+	}
+	r.LocalParticipant.SetAttributes(attrs)
+}
+
 func (c *outboundCall) setExtraAttrs(hdrToAttr map[string]string, opts livekit.SIPHeaderOptions, cc Signaling, hdrs Headers) {
 	extra := HeadersToAttrs(nil, hdrToAttr, opts, cc, hdrs)
 	if c.lkRoom != nil && len(extra) != 0 {
@@ -813,6 +832,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
 				info.CallStatusCode = e
 			})
+			c.setFailureStatusAttrs(e)
 			c.log.Infow("SIP invite rejected",
 				"status", e.Code,
 				"reason", e.Status,
