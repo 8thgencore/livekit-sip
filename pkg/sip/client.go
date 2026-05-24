@@ -16,6 +16,7 @@ package sip
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -452,12 +453,98 @@ func (c *Client) onBye(req *sip.Request, tx sip.ServerTransaction) bool {
 	if call == nil {
 		return false
 	}
-	call.log.Infow("BYE from remote")
+	reason, rawReason := outboundByeReason(req)
+	call.log.Infow("BYE from remote", "reason", reason.String(), "reason-raw", rawReason)
 	go func(call *outboundCall) {
 		call.cc.AcceptBye(req, tx)
-		call.CloseWithReason(ctx, CallHangup, stats.Success("bye"), livekit.DisconnectReason_CLIENT_INITIATED)
+		status, term, disconnectReason, sipStatus := classifyOutboundBye(reason)
+		if sipStatus != nil {
+			call.setFailureStatusAttrs(sipStatus)
+		}
+		call.CloseWithReason(ctx, status, term, disconnectReason)
 	}(call)
 	return true
+}
+
+func outboundByeReason(req *sip.Request) (ReasonHeader, string) {
+	h := req.GetHeader("Reason")
+	if h == nil {
+		return ReasonHeader{}, ""
+	}
+	raw := h.Value()
+	reason, err := ParseReasonHeader(raw)
+	if err != nil {
+		return ReasonHeader{}, raw
+	}
+	return reason, raw
+}
+
+func classifyOutboundBye(reason ReasonHeader) (CallStatus, stats.Termination, livekit.DisconnectReason, *livekit.SIPStatus) {
+	if reason.IsNormal() {
+		return CallHangup, stats.Success("bye"), livekit.DisconnectReason_CLIENT_INITIATED, nil
+	}
+
+	sipStatus := sipStatusFromByeReason(reason)
+	if sipStatus == nil {
+		term := stats.ClientError(fmt.Sprintf("bye-%s-%d", strings.ToLower(reason.Type), reason.Cause))
+		return callRejected, term, livekit.DisconnectReason_USER_REJECTED, nil
+	}
+
+	res := classifyInviteError(fmt.Errorf("BYE reason: %w", sipStatus))
+	return res.status, res.term, res.reason, sipStatus
+}
+
+func sipStatusFromByeReason(reason ReasonHeader) *livekit.SIPStatus {
+	code := 0
+	status := reason.Text
+	switch reason.Type {
+	case "sip":
+		code = reason.Cause
+	case "q.850":
+		switch reason.Cause {
+		case 1:
+			code, status = int(sip.StatusNotFound), defaultSIPStatusText(sip.StatusNotFound, status)
+		case 17:
+			code, status = int(sip.StatusBusyHere), defaultSIPStatusText(sip.StatusBusyHere, status)
+		case 18, 19, 20:
+			code, status = int(sip.StatusTemporarilyUnavailable), defaultSIPStatusText(sip.StatusTemporarilyUnavailable, status)
+		case 21:
+			code, status = int(sip.StatusGlobalDecline), defaultSIPStatusText(sip.StatusGlobalDecline, status)
+		case 34, 41, 42:
+			code, status = int(sip.StatusServiceUnavailable), defaultSIPStatusText(sip.StatusServiceUnavailable, status)
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	if code < 100 || code > 699 {
+		return nil
+	}
+	return &livekit.SIPStatus{
+		Code:   livekit.SIPStatusCode(code),
+		Status: defaultSIPStatusText(sip.StatusCode(code), status),
+	}
+}
+
+func defaultSIPStatusText(code sip.StatusCode, current string) string {
+	if strings.TrimSpace(current) != "" {
+		return current
+	}
+	switch code {
+	case sip.StatusNotFound:
+		return "Not Found"
+	case sip.StatusTemporarilyUnavailable:
+		return "Temporarily Unavailable"
+	case sip.StatusBusyHere:
+		return "Busy Here"
+	case sip.StatusServiceUnavailable:
+		return "Service Unavailable"
+	case sip.StatusGlobalDecline:
+		return "Declined"
+	default:
+		return sipStatus(code)
+	}
 }
 
 func (c *Client) onNotify(req *sip.Request, tx sip.ServerTransaction) bool {

@@ -315,6 +315,34 @@ func TestOutboundConnectErrorClassifiesAuthRetryExhaustedAsTrunkFailure(t *testi
 	require.Equal(t, livekit.DisconnectReason_SIP_TRUNK_FAILURE, reason)
 }
 
+func TestClassifyOutboundByeMapsBusyReason(t *testing.T) {
+	status, term, reason, sipStatus := classifyOutboundBye(ReasonHeader{
+		Type:  "q.850",
+		Cause: 17,
+		Text:  "User busy",
+	})
+
+	require.Equal(t, callRejected, status)
+	require.Equal(t, stats.ClientError("busy"), term)
+	require.Equal(t, livekit.DisconnectReason_USER_REJECTED, reason)
+	require.NotNil(t, sipStatus)
+	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_BUSY_HERE, sipStatus.Code)
+	require.Equal(t, "User busy", sipStatus.Status)
+}
+
+func TestClassifyOutboundByeKeepsNormalClearingCompleted(t *testing.T) {
+	status, term, reason, sipStatus := classifyOutboundBye(ReasonHeader{
+		Type:  "q.850",
+		Cause: 16,
+		Text:  "Normal call clearing",
+	})
+
+	require.Equal(t, CallHangup, status)
+	require.Equal(t, stats.Success("bye"), term)
+	require.Equal(t, livekit.DisconnectReason_CLIENT_INITIATED, reason)
+	require.Nil(t, sipStatus)
+}
+
 func TestOutboundInviteUsesRegisteredContactUser(t *testing.T) {
 	const (
 		mockRegisteredUser = "5550101"
