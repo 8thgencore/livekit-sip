@@ -432,6 +432,12 @@ func (c *Client) createSIPCallInfo(req *rpc.InternalCreateSIPParticipantRequest)
 }
 
 func (c *Client) OnRequest(req *sip.Request, tx sip.ServerTransaction) bool {
+	c.log.Debugw("received SIP request",
+		"method", req.Method,
+		"callID", requestCallID(req),
+		"fromTag", requestFromTag(req),
+		"toTag", requestToTag(req),
+	)
 	switch req.Method {
 	default:
 		return false
@@ -442,19 +448,106 @@ func (c *Client) OnRequest(req *sip.Request, tx sip.ServerTransaction) bool {
 	}
 }
 
+func (c *Client) getActiveCallForRequest(req *sip.Request) (*outboundCall, string) {
+	if tag, err := GetLocalTagUAS(req); err == nil && tag != "" {
+		c.cmu.Lock()
+		call := c.activeCalls[tag]
+		c.cmu.Unlock()
+		if call != nil {
+			return call, "to-tag"
+		}
+	}
+
+	if tag := requestFromTag(req); tag != "" {
+		c.cmu.Lock()
+		call := c.activeCalls[LocalTag(tag)]
+		c.cmu.Unlock()
+		if call != nil {
+			return call, "from-tag"
+		}
+	}
+
+	callID := requestCallID(req)
+	if callID == "" {
+		return nil, ""
+	}
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	for _, call := range c.activeCalls {
+		if call != nil && call.cc != nil && call.cc.SIPCallID() == callID {
+			return call, "call-id"
+		}
+	}
+	return nil, ""
+}
+
+func requestCallID(req *sip.Request) string {
+	if req == nil {
+		return ""
+	}
+	if h := req.CallID(); h != nil {
+		return h.Value()
+	}
+	return ""
+}
+
+func requestFromTag(req *sip.Request) string {
+	if req == nil {
+		return ""
+	}
+	from := req.From()
+	if from == nil {
+		return ""
+	}
+	tag, ok := getTagFrom(from.Params)
+	if !ok {
+		return ""
+	}
+	return string(tag)
+}
+
+func requestToTag(req *sip.Request) string {
+	if req == nil {
+		return ""
+	}
+	to := req.To()
+	if to == nil {
+		return ""
+	}
+	tag, ok := getTagFrom(to.Params)
+	if !ok {
+		return ""
+	}
+	return string(tag)
+}
+
+func requestHeaderValue(req *sip.Request, name string) string {
+	if req == nil {
+		return ""
+	}
+	h := req.GetHeader(name)
+	if h == nil {
+		return ""
+	}
+	return h.Value()
+}
+
 func (c *Client) onBye(req *sip.Request, tx sip.ServerTransaction) bool {
 	ctx := context.Background()
 	ctx, span := Tracer.Start(ctx, "sip.Client.onBye")
 	defer span.End()
-	tag, _ := GetLocalTagUAS(req)
-	c.cmu.Lock()
-	call := c.activeCalls[tag]
-	c.cmu.Unlock()
+	call, matchedBy := c.getActiveCallForRequest(req)
 	if call == nil {
+		c.log.Warnw("BYE from remote did not match an active outbound call", nil,
+			"callID", requestCallID(req),
+			"fromTag", requestFromTag(req),
+			"toTag", requestToTag(req),
+			"reason", requestHeaderValue(req, "Reason"),
+		)
 		return false
 	}
 	reason, rawReason := outboundByeReason(req)
-	call.log.Infow("BYE from remote", "reason", reason.String(), "reason-raw", rawReason)
+	call.log.Infow("BYE from remote", "matchedBy", matchedBy, "reason", reason.String(), "reason-raw", rawReason)
 	go func(call *outboundCall) {
 		call.cc.AcceptBye(req, tx)
 		status, term, disconnectReason, sipStatus := classifyOutboundBye(reason)
@@ -548,10 +641,7 @@ func defaultSIPStatusText(code sip.StatusCode, current string) string {
 }
 
 func (c *Client) onNotify(req *sip.Request, tx sip.ServerTransaction) bool {
-	tag, _ := GetLocalTagUAS(req)
-	c.cmu.Lock()
-	call := c.activeCalls[tag]
-	c.cmu.Unlock()
+	call, _ := c.getActiveCallForRequest(req)
 	if call == nil {
 		return false
 	}

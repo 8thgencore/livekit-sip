@@ -60,6 +60,36 @@ func newTestOutboundCall(client *Client) *outboundCall {
 	return call
 }
 
+func TestClientGetActiveCallForRequestFallsBackToCallID(t *testing.T) {
+	client := &Client{
+		activeCalls: make(map[LocalTag]*outboundCall),
+	}
+	from := URI{User: "0101536", Host: "127.0.0.1", Transport: TransportUDP}
+	contact := URI{User: "0101536", Host: "127.0.0.1", Transport: TransportUDP}
+	call := &outboundCall{}
+	call.cc = client.newOutbound(logger.GetLogger(), LocalTag("test-call-id"), from, contact, nil, nil)
+	call.cc.callID = "provider-call-id"
+
+	client.cmu.Lock()
+	client.activeCalls[call.cc.ID()] = call
+	client.cmu.Unlock()
+
+	req := sip.NewRequest(sip.BYE, sip.Uri{Host: "sip.provider.example"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "provider-call-id"))
+	req.AppendHeader(&sip.FromHeader{
+		Address: sip.Uri{User: "remote", Host: "sip.provider.example"},
+		Params:  sip.HeaderParams{{K: "tag", V: "remote-tag"}},
+	})
+	req.AppendHeader(&sip.ToHeader{
+		Address: sip.Uri{User: "0101536", Host: "127.0.0.1"},
+	})
+
+	matchedCall, matchedBy := client.getActiveCallForRequest(req)
+
+	require.Same(t, call, matchedCall)
+	require.Equal(t, "call-id", matchedBy)
+}
+
 func sendProxyAuthRequired(t *testing.T, tx *transactionRequest) {
 	t.Helper()
 	challenge := digest.Challenge{
