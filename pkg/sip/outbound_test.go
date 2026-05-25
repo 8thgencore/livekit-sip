@@ -90,6 +90,33 @@ func TestClientGetActiveCallForRequestFallsBackToCallID(t *testing.T) {
 	require.Equal(t, "call-id", matchedBy)
 }
 
+func TestSIPResponseContextTimeoutReturnsSIPRequestTimeout(t *testing.T) {
+	tx := &testSIPClientTransaction{
+		log:       logger.GetLogger(),
+		responses: make(chan *sip.Response),
+		cancels:   make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		err:       make(chan error),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancel()
+
+	resp, err := sipResponse(ctx, tx, make(chan struct{}), nil)
+
+	require.Nil(t, resp)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSIPRequestTimeout)
+	var sipErr *livekit.SIPStatus
+	require.ErrorAs(t, err, &sipErr)
+	require.Equal(t, livekit.SIPStatusCode_SIP_STATUS_REQUEST_TIMEOUT, sipErr.Code)
+	require.Equal(t, "Request Timeout", sipErr.Status)
+	select {
+	case <-tx.cancels:
+	default:
+		t.Fatal("expected SIP transaction cancellation")
+	}
+}
+
 func sendProxyAuthRequired(t *testing.T, tx *transactionRequest) {
 	t.Helper()
 	challenge := digest.Challenge{

@@ -433,7 +433,9 @@ func (c *outboundCall) close(ctx context.Context, err error, status CallStatus, 
 		// attributes_to_headers mapping in the setHeaders callback.
 		// See: https://github.com/livekit/sip/issues/404
 		c.stopSIP(ctx, t)
-		c.media.Close()
+		if c.media != nil {
+			c.media.Close()
+		}
 
 		if r := c.lkRoom; r != nil {
 			_ = r.CloseOutput()
@@ -660,7 +662,10 @@ func sipResponse(ctx context.Context, tx sip.ClientTransaction, stop <-chan stru
 			_ = tx.Cancel()
 			// NOTE: psrpc.Canceled does not auto-retry, whereas psrpc.DeadlineExceeded does
 			// As long as that is the case, avoid psrpc.DeadlineExceeded to prevent hammering of destination.
-			return nil, psrpc.NewError(psrpc.Canceled, ErrSIPRequestTimeout)
+			return nil, fmt.Errorf("%w: %w", ErrSIPRequestTimeout, &livekit.SIPStatus{
+				Code:   livekit.SIPStatusCode_SIP_STATUS_REQUEST_TIMEOUT,
+				Status: "Request Timeout",
+			})
 		case <-stop:
 			_ = tx.Cancel()
 			return nil, psrpc.NewErrorf(psrpc.Canceled, "service shutting down")
