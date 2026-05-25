@@ -42,6 +42,22 @@ func setOutboundRegisterMode(req interface{ ProtoReflect() protoreflect.Message 
 	msg.SetUnknown(unknown)
 }
 
+func TestOutboundRegisterModeDefaultsToRequired(t *testing.T) {
+	require.Equal(t, outboundRegisterModeRequired, outboundRegisterModeFromRequest(nil))
+	require.Equal(t, outboundRegisterModeRequired, outboundRegisterModeFromRequest(MinimalCreateSIPParticipantRequest()))
+	require.Equal(t, outboundRegisterModeRequired, normalizeOutboundRegisterMode(99))
+}
+
+func TestOutboundRegisterModeHonorsExplicitAutoAndDisabled(t *testing.T) {
+	req := MinimalCreateSIPParticipantRequest()
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+	require.Equal(t, outboundRegisterModeAuto, outboundRegisterModeFromRequest(req))
+
+	req = MinimalCreateSIPParticipantRequest()
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
+	require.Equal(t, outboundRegisterModeDisabled, outboundRegisterModeFromRequest(req))
+}
+
 func newTestOutboundCall(client *Client) *outboundCall {
 	contact := client.ContactURI(TransportUDP)
 	from := URI{
@@ -465,6 +481,7 @@ func TestOutboundInviteAutoRetriesWithoutRegistrationOnBusyHere(t *testing.T) {
 	req.Number = mockRegisteredUser
 	req.CallTo = mockCallToUser
 	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
 
 	done := make(chan error, 1)
 	go func() {
@@ -506,6 +523,7 @@ func TestOutboundInviteUiscomAllowsDirectFallbackAfterRegisteredBusyHere(t *test
 	req.Number = "0526470"
 	req.CallTo = "+77057756019"
 	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeAuto)
 
 	done := make(chan error, 1)
 	go func() {
@@ -1072,6 +1090,7 @@ func TestOutboundInviteWithoutRegistrationKeepsHostOnlyContact(t *testing.T) {
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
 	req.WaitUntilAnswered = true
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
 
 	done := make(chan error, 1)
 	go func() {
@@ -1243,6 +1262,7 @@ func TestOutboundRouteHeaderWithRecordRoute(t *testing.T) {
 	req.Headers = map[string]string{
 		"Route": initialRouteHeader.Value(),
 	}
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { // Allow test to continue

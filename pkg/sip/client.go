@@ -83,7 +83,7 @@ const internalCreateSIPParticipantRegisterModeName protoreflect.Name = "register
 
 func outboundRegisterModeFromRequest(req *rpc.InternalCreateSIPParticipantRequest) outboundRegisterMode {
 	if req == nil {
-		return outboundRegisterModeAuto
+		return outboundRegisterModeRequired
 	}
 	msg := req.ProtoReflect()
 	if fd := msg.Descriptor().Fields().ByName(internalCreateSIPParticipantRegisterModeName); fd != nil {
@@ -100,32 +100,32 @@ func outboundRegisterModeFromRequest(req *rpc.InternalCreateSIPParticipantReques
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			return outboundRegisterModeAuto
+			return outboundRegisterModeRequired
 		}
 		b = b[n:]
 		if num != internalCreateSIPParticipantRegisterModeField || typ != protowire.VarintType {
 			n = protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
-				return outboundRegisterModeAuto
+				return outboundRegisterModeRequired
 			}
 			b = b[n:]
 			continue
 		}
 		v, n := protowire.ConsumeVarint(b)
 		if n < 0 {
-			return outboundRegisterModeAuto
+			return outboundRegisterModeRequired
 		}
 		return normalizeOutboundRegisterMode(v)
 	}
-	return outboundRegisterModeAuto
+	return outboundRegisterModeRequired
 }
 
 func normalizeOutboundRegisterMode(v uint64) outboundRegisterMode {
 	switch outboundRegisterMode(v) {
-	case outboundRegisterModeDisabled, outboundRegisterModeRequired:
+	case outboundRegisterModeAuto, outboundRegisterModeDisabled, outboundRegisterModeRequired:
 		return outboundRegisterMode(v)
 	default:
-		return outboundRegisterModeAuto
+		return outboundRegisterModeRequired
 	}
 }
 
