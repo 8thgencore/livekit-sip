@@ -47,3 +47,28 @@ func prependRouteHeaders(req *sip.Request, routes []string) {
 		req.PrependHeader(sip.NewHeader("Route", routes[i]))
 	}
 }
+
+func serviceRouteHeaders(resp *sip.Response) []string {
+	if resp == nil {
+		return nil
+	}
+	var routes []string
+	for _, h := range resp.GetHeaders("Service-Route") {
+		if h == nil {
+			continue
+		}
+		value := strings.TrimSpace(h.Value())
+		if value != "" {
+			routes = append(routes, value)
+		}
+	}
+	return routes
+}
+
+func registrationRouteHeader(conf *ResolvedRegistrationConfig) string {
+	if conf == nil {
+		return ""
+	}
+	uri := conf.Registrar
+	return "<" + uri.GetURI().String() + ";lr>"
+}

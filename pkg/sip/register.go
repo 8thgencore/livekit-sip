@@ -59,6 +59,7 @@ type ResolvedRegistrationConfig struct {
 	ContactUser               string
 	FromDomain                string
 	RouteHeaders              []string
+	ServiceRouteHeaders       []string
 	Transport                 Transport
 	Expires                   time.Duration
 	RefreshBefore             time.Duration
@@ -457,10 +458,12 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 		switch resp.StatusCode {
 		case sip.StatusOK:
 			expires := registrationExpires(resp, conf.Expires)
+			conf.ServiceRouteHeaders = serviceRouteHeaders(resp)
 			c.registrationManager.markSuccessfulRegister(cacheKey, time.Now())
 			c.log.Infow("SIP REGISTER succeeded",
 				"registrar", conf.Registrar.GetDest(),
 				"expiresSec", int(expires/time.Second),
+				"serviceRoutes", conf.ServiceRouteHeaders,
 			)
 			return expires, nil
 		case sip.StatusUnauthorized:

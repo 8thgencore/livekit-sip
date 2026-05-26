@@ -202,6 +202,41 @@ func TestEnsureRegisteredAddsConfiguredRouteHeadersInOrder(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestEnsureRegisteredStoresServiceRouteHeaders(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	type result struct {
+		conf *ResolvedRegistrationConfig
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: mockRegistrarHost + ":5060",
+			host:    "sip.beeline.example",
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+		})
+		done <- result{conf: conf, err: err}
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	resp := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	resp.AppendHeader(sip.NewHeader("Service-Route", "<sip:ims-edge-1.example.com;lr>"))
+	resp.AppendHeader(sip.NewHeader("Service-Route", "<sip:ims-edge-2.example.com;lr>"))
+	require.NoError(t, tx.transaction.SendResponse(resp))
+
+	res := <-done
+	require.NoError(t, res.err)
+	require.NotNil(t, res.conf)
+	require.Equal(t, []string{
+		"<sip:ims-edge-1.example.com;lr>",
+		"<sip:ims-edge-2.example.com;lr>",
+	}, res.conf.ServiceRouteHeaders)
+}
+
 func TestEnsureRegisteredWithoutCredentialsSkipsRegister(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

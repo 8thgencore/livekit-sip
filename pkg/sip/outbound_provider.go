@@ -3,6 +3,7 @@ package sip
 import (
 	"net"
 	"strings"
+	"time"
 )
 
 type outboundProviderProfile struct {
@@ -12,6 +13,8 @@ type outboundProviderProfile struct {
 	DirectAuthFailureIsConfigError      bool
 	DeleteTrunkAfterCall                bool
 	DefaultG711Only                     bool
+	RouteRegisteredInviteToRegistrar    bool
+	RegisterInviteSettlingDelay         time.Duration
 	OutboundQueueScope                  outboundProviderQueueScope
 	OutboundMaxConcurrentCalls          int
 }
@@ -70,6 +73,12 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 	"mangosip.ru": {
 		ID:                                  "mangosip",
 		AllowRegisteredInviteDirectFallback: true,
+	},
+	"ip.beeline.ru": {
+		ID:                               "beeline",
+		DefaultG711Only:                  true,
+		RouteRegisteredInviteToRegistrar: true,
+		RegisterInviteSettlingDelay:      3 * time.Second,
 	},
 	"sipuni.ru": {
 		ID:                                  "sipuni",

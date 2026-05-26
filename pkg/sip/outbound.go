@@ -71,10 +71,18 @@ type sipOutboundConfig struct {
 	displayName     *string
 	registerMode    outboundRegisterMode
 	routeHeaders    []string
+	registerDelay   time.Duration
 }
 
 const (
 	inviteRetryAfterFreshRegisterDelay = 2 * time.Second
+)
+
+const (
+	attrSIPInviteState      = livekit.AttrSIPPrefix + "inviteState"
+	sipInviteStateCalling   = "calling"
+	sipInviteStateEarly     = "early"
+	sipInviteStateConfirmed = "confirmed"
 )
 
 type providerAuthConfigError struct {
@@ -144,6 +152,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 		sipConf.host = contact.GetHost()
 	}
 	providerProfile := outboundProviderProfileForAddress(sipConf.address)
+	sipConf.registerDelay = providerProfile.RegisterInviteSettlingDelay
 	directContact := contact
 	directFrom := URI{
 		User:      sipConf.from,
@@ -213,7 +222,14 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
 	call.cc.directProviderAuthConfigError = providerProfile.DirectAuthFailureIsConfigError &&
 		(sipConf.registerMode == outboundRegisterModeDisabled || sipConf.registerMode == outboundRegisterModeAuto)
-	call.cc.routeHeaders = cloneRouteHeaders(sipConf.routeHeaders)
+	if regProfile != nil {
+		call.cc.routeHeaders = appendRouteHeaders(sipConf.routeHeaders, regProfile.ServiceRouteHeaders)
+		if providerProfile.RouteRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
+			call.cc.routeHeaders = appendRouteHeaders(call.cc.routeHeaders, []string{registrationRouteHeader(regProfile)})
+		}
+	} else {
+		call.cc.routeHeaders = cloneRouteHeaders(sipConf.routeHeaders)
+	}
 
 	call.mon = c.mon.NewCall(stats.Outbound, sipConf.host, sipConf.address)
 
@@ -583,6 +599,7 @@ func (c *outboundCall) connectToRoom(ctx context.Context, lkNew RoomConfig, getR
 	}
 
 	attrs[livekit.AttrSIPCallStatus] = CallDialing.Attribute()
+	attrs[attrSIPInviteState] = sipInviteStateCalling
 	lkNew.Participant.Attributes = attrs
 	r := getRoom(c.log, &c.stats.Room)
 	if err := r.Connect(ctx, c.c.conf, lkNew); err != nil {
@@ -722,6 +739,22 @@ func (c *outboundCall) setStatus(v CallStatus) {
 	})
 }
 
+func (c *outboundCall) setInviteState(v string) {
+	if v == "" {
+		return
+	}
+	if c.lkRoom == nil {
+		return
+	}
+	r := c.lkRoom.Room()
+	if r == nil {
+		return
+	}
+	r.LocalParticipant.SetAttributes(map[string]string{
+		attrSIPInviteState: v,
+	})
+}
+
 func (c *outboundCall) setFailureStatusAttrs(status *livekit.SIPStatus) {
 	if status == nil || c.lkRoom == nil {
 		return
@@ -794,7 +827,11 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 
 	toUri := CreateURIFromUserAndAddress(c.sipConf.to, c.sipConf.address, TransportFrom(c.sipConf.transport))
 	if c.regProfile != nil {
-		if err := c.c.registrationManager.waitForRegisterSettling(ctx, c.regProfile.cacheKey(), invitePostRegisterSettlingDelay); err != nil {
+		delay := c.sipConf.registerDelay
+		if delay <= 0 {
+			delay = invitePostRegisterSettlingDelay
+		}
+		if err := c.c.registrationManager.waitForRegisterSettling(ctx, c.regProfile.cacheKey(), delay); err != nil {
 			return err
 		}
 	}
@@ -811,6 +848,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 			ringing = true
 			c.sigTs.RingingTime = time.Now()
 			c.setStatus(CallRinging)
+			c.setInviteState(sipInviteStateEarly)
 		}
 		c.setExtraAttrs(nil, 0, nil, hdrs)
 	}
@@ -879,6 +917,7 @@ func (c *outboundCall) sipSignal(ctx context.Context, tid traceid.ID) error {
 		return err
 	}
 	c.sigTs.AckTime = time.Now()
+	c.setInviteState(sipInviteStateConfirmed)
 	joinDur()
 
 	c.setExtraAttrs(c.sipConf.headersToAttrs, c.sipConf.includeHeaders, c.cc, nil)
@@ -1180,6 +1219,7 @@ authLoop:
 		var authHeaderRespName string
 		switch resp.StatusCode {
 		case sip.StatusOK:
+			c.logInviteAcceptedResponse(resp)
 			break authLoop
 		default:
 			c.logInviteFinalResponse(resp)
@@ -1412,6 +1452,23 @@ func (c *sipOutbound) logInviteFinalResponse(resp *sip.Response) {
 		}
 	}
 	c.log.Infow("SIP INVITE final response received", fields...)
+}
+
+func (c *sipOutbound) logInviteAcceptedResponse(resp *sip.Response) {
+	if resp == nil {
+		return
+	}
+	fields := []interface{}{
+		"status", resp.StatusCode,
+		"reason", resp.Reason,
+		"bodyBytes", len(resp.Body()),
+	}
+	for _, name := range []string{"Contact", "Server", "User-Agent"} {
+		if h := resp.GetHeader(name); h != nil {
+			fields = append(fields, name, h.Value())
+		}
+	}
+	c.log.Infow("SIP INVITE accepted", fields...)
 }
 
 func inviteRequestLogFields(req *sip.Request) []interface{} {
