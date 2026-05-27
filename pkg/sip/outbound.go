@@ -1228,6 +1228,7 @@ authLoop:
 				Status: resp.Reason,
 			})
 		case sip.StatusBadRequest,
+			sip.StatusForbidden,
 			sip.StatusNotFound,
 			sip.StatusRequestTerminated,
 			sip.StatusTemporarilyUnavailable,
@@ -1327,7 +1328,7 @@ func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProf
 	if c == nil || c.c == nil || c.c.registrationManager == nil || regProfile == nil || resp == nil {
 		return false, nil
 	}
-	if resp.StatusCode != sip.StatusTemporarilyUnavailable && resp.StatusCode != sip.StatusServiceUnavailable {
+	if !shouldRetryInviteAfterFreshRegister(resp) {
 		return false, nil
 	}
 	age, ok := c.c.registrationManager.freshSuccessfulRegisterAge(regProfile.cacheKey(), freshRegisterInviteRetry)
@@ -1356,6 +1357,23 @@ func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProf
 		return false, ctx.Err()
 	case <-c.c.closing.Watch():
 		return false, errors.New("SIP client closed")
+	}
+}
+
+func shouldRetryInviteAfterFreshRegister(resp *sip.Response) bool {
+	if resp == nil {
+		return false
+	}
+	switch resp.StatusCode {
+	case sip.StatusTemporarilyUnavailable, sip.StatusServiceUnavailable:
+		return true
+	case sip.StatusForbidden:
+		body := strings.ToLower(string(resp.Body()))
+		return strings.Contains(body, "<ims-3gpp") &&
+			strings.Contains(body, "<alternative-service>") &&
+			strings.Contains(body, "<action>initial-registration</action>")
+	default:
+		return false
 	}
 }
 

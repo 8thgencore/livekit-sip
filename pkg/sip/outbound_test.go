@@ -599,9 +599,16 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 		name   string
 		status sip.StatusCode
 		reason string
+		body   []byte
 	}{
 		{name: "temporarily unavailable", status: sip.StatusTemporarilyUnavailable, reason: "Temporarily Unavailable"},
 		{name: "service unavailable", status: sip.StatusServiceUnavailable, reason: "Service Unavailable"},
+		{
+			name:   "forbidden ims initial registration",
+			status: sip.StatusForbidden,
+			reason: "Forbidden",
+			body:   []byte(`<?xml version="1.0" encoding="UTF-8"?><ims-3gpp version="1"><alternative-service><type>restoration</type><reason>timeout</reason><action>initial-registration</action></alternative-service></ims-3gpp>`),
+		},
 	}
 
 	for _, tc := range tests {
@@ -624,6 +631,9 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 			}
 			req := sip.NewRequest(sip.INVITE, sip.Uri{Host: "sip.retry-register.example"})
 			resp := sip.NewResponseFromRequest(req, tc.status, tc.reason, nil)
+			if len(tc.body) != 0 {
+				resp.SetBody(tc.body)
+			}
 
 			type result struct {
 				retried bool
@@ -644,6 +654,30 @@ func TestRetryInviteAfterFreshRegisterForceReregistersOnTemporaryFailures(t *tes
 			require.True(t, res.retried)
 		})
 	}
+}
+
+func TestRetryInviteAfterFreshRegisterDoesNotReregisterOnGenericForbidden(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: "sip.retry-register.example:5060",
+		host:    "sip.retry-register.example",
+		user:    "5550107",
+		pass:    "test-password",
+	})
+	require.NoError(t, err)
+	client.registrationManager.markSuccessfulRegister(conf.cacheKey(), time.Now())
+
+	outbound := &sipOutbound{
+		c:   client,
+		log: logger.GetLogger(),
+	}
+	req := sip.NewRequest(sip.INVITE, sip.Uri{Host: "sip.retry-register.example"})
+	resp := sip.NewResponseFromRequest(req, sip.StatusForbidden, "Forbidden", nil)
+
+	retried, err := outbound.retryInviteAfterFreshRegister(context.Background(), conf, "test-password", resp)
+	require.NoError(t, err)
+	require.False(t, retried)
 }
 
 func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
