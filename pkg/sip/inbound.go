@@ -16,8 +16,6 @@ package sip
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math"
@@ -30,7 +28,6 @@ import (
 	"time"
 
 	"github.com/frostbyte73/core"
-	"github.com/icholy/digest"
 	"github.com/pkg/errors"
 
 	msdk "github.com/livekit/media-sdk"
@@ -66,25 +63,11 @@ const (
 	inviteOKRetryAttempts      = 5
 	inviteOKRetryAttemptsNoACK = 2
 	inviteOkAckLateTimeout     = inviteOkRetryIntervalMax
-	authChallengeTimeout       = 30 * time.Second
 )
 
 var allowHeader = sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE")
 
 var errNoACK = errors.New("no ACK received for 200 OK")
-
-// hashPassword creates a SHA256 hash of the password for logging purposes
-func hashPassword(password string) string {
-	if password == "" {
-		return "<empty>"
-	}
-	hash := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(hash[:8]) // Use first 8 bytes for shorter hash
-}
-
-func generateNonce(sipCallID string) string {
-	return fmt.Sprintf("%d-%s", time.Now().UnixMicro(), sipCallID)
-}
 
 type inboundCallInfo struct {
 	sync.Mutex
@@ -141,174 +124,6 @@ func (s *Server) getCallInfo(id LocalTag) *inboundCallInfo {
 	c = &inboundCallInfo{}
 	s.infos.byLocalTag.Add(id, c)
 	return c
-}
-
-func (s *Server) getInvite(sipCallID string) *inProgressInvite {
-	s.imu.Lock()
-	defer s.imu.Unlock()
-	for i := range s.inProgressInvites {
-		if s.inProgressInvites[i].sipCallID == sipCallID {
-			return s.inProgressInvites[i]
-		}
-	}
-	if len(s.inProgressInvites) >= digestLimit {
-		s.inProgressInvites = s.inProgressInvites[1:]
-	}
-	is := &inProgressInvite{sipCallID: sipCallID}
-	s.inProgressInvites = append(s.inProgressInvites, is)
-	return is
-}
-
-// scheduleAuthChallengeTimeout finalizes st as SCS_ERROR after authChallengeTimeout
-// unless authResolved is set to true (by a follow-up INVITE) before the timer fires.
-func (i *inProgressInvite) scheduleAuthChallengeTimeout(st *CallState, log logger.Logger) {
-	i.authResolved.Store(false)
-	challengedAt := time.Now()
-	time.AfterFunc(authChallengeTimeout, func() {
-		if !i.authResolved.CompareAndSwap(false, true) {
-			return
-		}
-		log.Infow("auth challenge timed out without authenticated retry; finalizing call as error",
-			"sipCallID", i.sipCallID, "timeout", authChallengeTimeout)
-		st.Update(context.Background(), func(info *livekit.SIPCallInfo) {
-			info.CallStatus = livekit.SIPCallStatus_SCS_ERROR
-			info.Error = "auth challenge issued, no authenticated retry received"
-			// EndedAtNs reflects when the call effectively ended.
-			info.EndedAtNs = challengedAt.UnixNano()
-		})
-	})
-}
-
-// handleInviteAuth performs SIP digest authentication on an inbound INVITE.
-// The challenge return value distinguishes the normal digest handshake (where we
-// just sent the initial 407 with no credentials yet provided and expect the
-// client to retry) from a hard auth failure. Callers should treat
-// (ok=false, challenge=true) as non-terminal so it doesn't end up recorded as
-// a finalized error state.
-func (s *Server) handleInviteAuth(tid traceid.ID, log logger.Logger, req *sip.Request, tx sip.ServerTransaction, from string, auth InboundAuth) (ok bool, challenge bool) {
-	if auth.Realm == "" {
-		auth.Realm = UserAgent
-	}
-	log = log.WithValues(
-		"username", auth.Username,
-		"passwordHash", hashPassword(auth.Password),
-		"method", req.Method.String(),
-		"uri", req.Recipient.String(),
-	)
-
-	log.Infow("Starting SIP invite authentication")
-
-	if auth.Username == "" || auth.Password == "" {
-		log.Debugw("Skipping authentication - no credentials provided")
-		return true, false
-	}
-
-	if s.conf.HideInboundPort {
-		// We will send password request anyway, so might as well signal that the progress is made.
-		log.Debugw("Sending processing response due to HideInboundPort config")
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 100, "Processing", nil))
-	}
-
-	// Extract SIP Call ID for tracking in-progress invites
-	sipCallID := ""
-	if h := req.CallID(); h != nil {
-		sipCallID = h.Value()
-	}
-	inviteState := s.getInvite(sipCallID)
-	log = log.WithValues("inviteStateSipCallID", sipCallID)
-
-	h := req.GetHeader("Proxy-Authorization")
-	if h == nil {
-		inviteState.challenge = digest.Challenge{
-			Realm:     auth.Realm,
-			Nonce:     generateNonce(sipCallID),
-			Algorithm: "MD5",
-		}
-
-		log.Debugw("Created digest challenge",
-			"realm", inviteState.challenge.Realm,
-			"nonce", inviteState.challenge.Nonce,
-			"algorithm", inviteState.challenge.Algorithm,
-		)
-
-		res := sip.NewResponseFromRequest(req, 407, "Unauthorized", nil)
-		res.AppendHeader(sip.NewHeader("Proxy-Authenticate", inviteState.challenge.String()))
-		_ = tx.Respond(res)
-		log.Infow("No Proxy header found. Sending 407 Unauthorized response with Proxy-Authenticate header")
-		return false, true
-	}
-
-	log.Debugw("Found Proxy-Authorization header, parsing credentials")
-	cred, err := digest.ParseCredentials(h.Value())
-	if err != nil {
-		log.Warnw("Failed to parse Proxy-Authorization credentials", err,
-			"headerValue", h.Value(),
-		)
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false, false
-	}
-
-	// Set credURI and credUsername in logger early to avoid repetitive logging
-	log = log.WithValues("credURI", cred.URI, "credUsername", cred.Username)
-
-	log.Debugw("Parsed credentials successfully", "cred", cred)
-
-	// Validate that the username in the request matches the expected username
-	if cred.Username != auth.Username {
-		log.Warnw("Authentication failed - username mismatch", errors.New("username mismatch"),
-			"expectedUsername", auth.Username,
-			"receivedUsername", cred.Username,
-		)
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
-		return false, false
-	}
-
-	// Check if we have a valid challenge state
-	if inviteState.challenge.Realm == "" {
-		log.Warnw("No challenge state found for authentication attempt", errors.New("missing challenge state"),
-			"sipCallID", sipCallID,
-			"expectedRealm", auth.Realm,
-		)
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false, false
-	}
-
-	log.Debugw("Computing digest response",
-		"challengeRealm", inviteState.challenge.Realm,
-		"challengeNonce", inviteState.challenge.Nonce,
-		"challengeAlgorithm", inviteState.challenge.Algorithm,
-	)
-
-	digCred, err := digest.Digest(&inviteState.challenge, digest.Options{
-		Method:   req.Method.String(),
-		URI:      cred.URI,
-		Username: cred.Username,
-		Password: auth.Password,
-	})
-
-	if err != nil {
-		log.Warnw("Failed to compute digest response", err)
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Bad credentials", nil))
-		return false, false
-	}
-
-	log.Debugw("Digest computation completed",
-		"expectedResponse", digCred.Response,
-		"receivedResponse", cred.Response,
-		"responsesMatch", cred.Response == digCred.Response,
-	)
-
-	if cred.Response != digCred.Response {
-		log.Warnw("Authentication failed - response mismatch", errors.New("response mismatch"),
-			"expectedResponse", digCred.Response,
-			"receivedResponse", cred.Response,
-		)
-		_ = tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
-		return false, false
-	}
-
-	log.Infow("SIP invite authentication successful")
-	return true, false
 }
 
 func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) bool {
@@ -535,14 +350,6 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 			cc.Processing()
 			tryingTime = time.Now()
 		}
-		sipCallID := ""
-		if h := req.CallID(); h != nil {
-			sipCallID = h.Value()
-		}
-		inviteState := s.getInvite(sipCallID)
-		// New INVITE supersedes any pending 407-challenge timer for this Call-ID.
-		inviteState.authResolved.Store(true)
-
 		s.getCallInfo(cc.ID()).countInvite(log, req)
 		if registered {
 			log.Infow("SIP inbound REGISTER verified, accepting INVITE without digest challenge",
@@ -551,21 +358,11 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 			)
 			break
 		}
-		if ok, challenge := s.handleInviteAuth(tid, log, req, tx, from.User, r.Auth); !ok {
-			// Store (call-ID + from tag) to (to tag) mapping
-			s.cmu.Lock()
-			s.provisionalInvites.Add([2]string{cc.SIPCallID(), string(cc.Tag())}, cc.ID())
-			s.cmu.Unlock()
-			cmon.InviteErrorShort(stats.ClientError("unauthorized"))
-			if challenge {
-				// 407 sent: defer finalization to the timer or the next INVITE,
-				// not the deferred handler at the top of processInvite.
-				inviteState.scheduleAuthChallengeTimeout(state, log)
-				state = nil
-			}
-			// handleInviteAuth will generate the SIP Response as needed
-			return psrpc.NewErrorf(psrpc.PermissionDenied, "invalid credentials were provided")
-		}
+		log.Infow("SIP inbound accepting INVITE without digest challenge",
+			"providerID", r.ProviderInfo.GetId(),
+			"providerName", r.ProviderInfo.GetName(),
+			"registrar", r.RegisterAddr,
+		)
 		// ok
 	case AuthAccept:
 		s.getCallInfo(cc.ID()).countInvite(log, req)

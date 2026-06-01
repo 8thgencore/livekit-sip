@@ -209,6 +209,14 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
 	require.True(t, mtt.DefaultG711Only)
 
+	beeline := outboundProviderProfileForAddress("ip.beeline.ru:5060")
+	require.Equal(t, "beeline", beeline.ID)
+	require.True(t, beeline.DefaultG711Only)
+	require.True(t, beeline.RouteRegisteredInviteToRegistrar)
+	require.True(t, beeline.RouteRegistrationToRegistrar)
+	require.True(t, beeline.AlwaysRefreshRegistrationBeforeInvite)
+	require.Equal(t, 3*time.Second, beeline.RegisterInviteSettlingDelay)
+
 	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
 	require.Equal(t, "sipuni", sipuni.ID)
 	require.False(t, sipuni.SkipRegistrationInAuto)

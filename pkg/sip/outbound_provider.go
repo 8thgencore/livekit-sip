@@ -7,16 +7,18 @@ import (
 )
 
 type outboundProviderProfile struct {
-	ID                                  string
-	SkipRegistrationInAuto              bool
-	AllowRegisteredInviteDirectFallback bool
-	DirectAuthFailureIsConfigError      bool
-	DeleteTrunkAfterCall                bool
-	DefaultG711Only                     bool
-	RouteRegisteredInviteToRegistrar    bool
-	RegisterInviteSettlingDelay         time.Duration
-	OutboundQueueScope                  outboundProviderQueueScope
-	OutboundMaxConcurrentCalls          int
+	ID                                    string
+	SkipRegistrationInAuto                bool
+	AllowRegisteredInviteDirectFallback   bool
+	DirectAuthFailureIsConfigError        bool
+	DeleteTrunkAfterCall                  bool
+	DefaultG711Only                       bool
+	RouteRegisteredInviteToRegistrar      bool
+	RouteRegistrationToRegistrar          bool
+	AlwaysRefreshRegistrationBeforeInvite bool
+	RegisterInviteSettlingDelay           time.Duration
+	OutboundQueueScope                    outboundProviderQueueScope
+	OutboundMaxConcurrentCalls            int
 }
 
 type outboundProviderQueueScope string
@@ -75,10 +77,12 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		AllowRegisteredInviteDirectFallback: true,
 	},
 	"ip.beeline.ru": {
-		ID:                               "beeline",
-		DefaultG711Only:                  true,
-		RouteRegisteredInviteToRegistrar: true,
-		RegisterInviteSettlingDelay:      3 * time.Second,
+		ID:                                    "beeline",
+		DefaultG711Only:                       true,
+		RouteRegisteredInviteToRegistrar:      true,
+		RouteRegistrationToRegistrar:          true,
+		AlwaysRefreshRegistrationBeforeInvite: true,
+		RegisterInviteSettlingDelay:           3 * time.Second,
 	},
 	"sipuni.ru": {
 		ID:                                  "sipuni",

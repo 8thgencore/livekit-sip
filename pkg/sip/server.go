@@ -24,12 +24,10 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/frostbyte73/core"
 	"github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/icholy/digest"
 	"golang.org/x/exp/maps"
 
 	msdk "github.com/livekit/media-sdk"
@@ -44,10 +42,7 @@ import (
 	"github.com/livekit/sip/pkg/stats"
 )
 
-const (
-	UserAgent   = "AI-MOP"
-	digestLimit = 500
-)
+const UserAgent = "AI-MOP"
 
 const (
 	maxCallCache = 5000        // ~8 B per entry, ~40 KB
@@ -152,9 +147,6 @@ type Server struct {
 	sipListeners []io.Closer
 	sipUnhandled RequestHandler
 
-	imu               sync.Mutex
-	inProgressInvites []*inProgressInvite
-
 	closing            core.Fuse
 	cmu                sync.RWMutex
 	byLocalTag         map[LocalTag]*inboundCall
@@ -173,12 +165,6 @@ type Server struct {
 	cli *Client // optional, for outbound reinvite handling
 
 	res mediaRes
-}
-
-type inProgressInvite struct {
-	sipCallID    string
-	challenge    digest.Challenge
-	authResolved atomic.Bool
 }
 
 type rejectedInviteResponse struct {

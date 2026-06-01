@@ -100,6 +100,44 @@ func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestEnsureRegisteredBeelineRefreshesBeforeEachInvite(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	sipConf := sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipConf)
+		firstDone <- err
+	}()
+	firstTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, firstTx.req.Method)
+	firstRoutes := firstTx.req.GetHeaders("Route")
+	require.Len(t, firstRoutes, 1)
+	require.Equal(t, "<sip:ip.beeline.ru:5060;transport=udp;lr>", firstRoutes[0].Value())
+	require.NoError(t, firstTx.transaction.SendResponse(sip.NewResponseFromRequest(firstTx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-firstDone)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipConf)
+		secondDone <- err
+	}()
+	secondTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, secondTx.req.Method)
+	secondRoutes := secondTx.req.GetHeaders("Route")
+	require.Len(t, secondRoutes, 1)
+	require.Equal(t, "<sip:ip.beeline.ru:5060;transport=udp;lr>", secondRoutes[0].Value())
+	require.NoError(t, secondTx.transaction.SendResponse(sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)))
+	require.NoError(t, <-secondDone)
+}
+
 func TestEnsureRegisteredKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

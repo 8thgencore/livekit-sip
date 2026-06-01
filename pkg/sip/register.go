@@ -353,6 +353,11 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 	if err != nil || conf == nil {
 		return conf, err
 	}
+	providerProfile := outboundProviderProfileForAddress(sipConf.address)
+	conf.AlwaysRefreshBeforeInvite = providerProfile.AlwaysRefreshRegistrationBeforeInvite
+	if providerProfile.RouteRegistrationToRegistrar {
+		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
+	}
 
 	contact := c.ContactURI(conf.Transport)
 	contact.User = conf.ContactUser
