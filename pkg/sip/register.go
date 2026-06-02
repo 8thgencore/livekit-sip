@@ -69,12 +69,13 @@ type ResolvedRegistrationConfig struct {
 }
 
 type registrationState struct {
-	expiresAt      time.Time
-	lastUsedAt     time.Time
-	lastSuccessAt  time.Time
-	inflight       chan struct{}
-	refreshStarted bool
-	err            error
+	expiresAt           time.Time
+	lastUsedAt          time.Time
+	lastSuccessAt       time.Time
+	serviceRouteHeaders []string
+	inflight            chan struct{}
+	refreshStarted      bool
+	err                 error
 }
 
 type RegistrationManager struct {
@@ -103,6 +104,7 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 		}
 		st.lastUsedAt = time.Now()
 		if !conf.AlwaysRefreshBeforeInvite && st.inflight == nil && st.expiresAt.After(time.Now().Add(conf.RefreshBefore)) {
+			conf.ServiceRouteHeaders = cloneRouteHeaders(st.serviceRouteHeaders)
 			m.ensureRefreshLoopLocked(c, key, conf, password, contact, st)
 			m.mu.Unlock()
 			return nil
@@ -125,9 +127,11 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 		m.mu.Lock()
 		if err == nil {
 			st.expiresAt = time.Now().Add(expires)
+			st.serviceRouteHeaders = cloneRouteHeaders(conf.ServiceRouteHeaders)
 			m.ensureRefreshLoopLocked(c, key, conf, password, contact, st)
 		} else {
 			st.expiresAt = time.Time{}
+			st.serviceRouteHeaders = nil
 		}
 		st.err = err
 		close(st.inflight)
@@ -245,8 +249,10 @@ func (m *RegistrationManager) refresh(ctx context.Context, c *Client, key string
 		m.mu.Lock()
 		if err == nil {
 			st.expiresAt = time.Now().Add(expires)
+			st.serviceRouteHeaders = cloneRouteHeaders(conf.ServiceRouteHeaders)
 		} else if !st.expiresAt.After(time.Now()) {
 			st.expiresAt = time.Time{}
+			st.serviceRouteHeaders = nil
 		}
 		st.err = err
 		close(st.inflight)

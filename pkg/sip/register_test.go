@@ -365,6 +365,7 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	}()
 	tx := waitTransaction(t, sipClient)
 	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:ims-edge.example.com;lr>"))
 	require.NoError(t, tx.transaction.SendResponse(ok))
 	require.NoError(t, <-done)
 
@@ -376,6 +377,7 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, conf)
+	require.Equal(t, []string{"<sip:ims-edge.example.com;lr>"}, conf.ServiceRouteHeaders)
 
 	select {
 	case tx = <-sipClient.transactions:

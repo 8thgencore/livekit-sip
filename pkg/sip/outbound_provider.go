@@ -121,8 +121,18 @@ func ShouldDeleteOutboundTrunkAfterCall(address string) bool {
 }
 
 func normalizeSIPHost(address string) string {
-	host := address
+	host := strings.ToLower(strings.TrimSpace(address))
+	host = strings.TrimPrefix(host, "sip:")
+	host = strings.TrimPrefix(host, "sips:")
+	if i := strings.Index(host, ";"); i >= 0 {
+		host = host[:i]
+	}
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		host = host[i+1:]
+	}
 	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
+		host = parsedHost
+	} else if parsedHost, _, err := net.SplitHostPort(host); err == nil {
 		host = parsedHost
 	}
 	return strings.ToLower(strings.TrimSuffix(host, "."))

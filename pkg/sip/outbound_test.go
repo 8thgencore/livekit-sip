@@ -217,6 +217,10 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, beeline.AlwaysRefreshRegistrationBeforeInvite)
 	require.Equal(t, 3*time.Second, beeline.RegisterInviteSettlingDelay)
 
+	beelineWithTransport := outboundProviderProfileForAddress("ip.beeline.ru:5060;transport=udp")
+	require.Equal(t, "beeline", beelineWithTransport.ID)
+	require.True(t, beelineWithTransport.AlwaysRefreshRegistrationBeforeInvite)
+
 	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
 	require.Equal(t, "sipuni", sipuni.ID)
 	require.False(t, sipuni.SkipRegistrationInAuto)
