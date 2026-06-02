@@ -379,7 +379,11 @@ func (c *Client) forceRegister(ctx context.Context, conf *ResolvedRegistrationCo
 
 	contact := c.ContactURI(forceConf.Transport)
 	contact.User = forceConf.ContactUser
-	return c.registrationManager.ensure(ctx, c, forceConf, password, contact)
+	if err := c.registrationManager.ensure(ctx, c, forceConf, password, contact); err != nil {
+		return err
+	}
+	conf.ServiceRouteHeaders = cloneRouteHeaders(forceConf.ServiceRouteHeaders)
+	return nil
 }
 
 func resolveRegistrationConfig(sipConf sipOutboundConfig) (*ResolvedRegistrationConfig, error) {

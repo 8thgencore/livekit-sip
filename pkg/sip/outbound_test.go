@@ -692,6 +692,55 @@ func TestRetryInviteAfterFreshRegisterDoesNotReregisterOnGenericForbidden(t *tes
 	require.False(t, retried)
 }
 
+func TestRetryInviteAfterServiceNotAuthorisedReregistersAndUsesServiceRoute(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    "9063671384",
+		pass:    "test-password",
+	})
+	require.NoError(t, err)
+
+	outbound := &sipOutbound{
+		c:                                client,
+		log:                              logger.GetLogger(),
+		configuredRouteHeaders:           []string{"<sip:configured-proxy.example.com;lr>"},
+		routeHeaders:                     []string{"<sip:configured-proxy.example.com;lr>", "<sip:ip.beeline.ru:5060;transport=udp;lr>"},
+		routeRegisteredInviteToRegistrar: true,
+	}
+	req := sip.NewRequest(sip.INVITE, sip.Uri{Host: "ip.beeline.ru"})
+	resp := sip.NewResponseFromRequest(req, sip.StatusForbidden, "Forbidden", nil)
+	resp.AppendHeader(sip.NewHeader("Warning", `127 invaild.com "Service not authorised"`))
+
+	type result struct {
+		retried bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		retried, err := outbound.retryInviteAfterFreshRegister(context.Background(), conf, "test-password", resp)
+		done <- result{retried: retried, err: err}
+	}()
+
+	registerTx := waitTransactionWithTimeout(t, sipClient, 3*time.Second)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	ok := sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	sendTestResponse(t, registerTx, ok)
+
+	res := <-done
+	require.NoError(t, res.err)
+	require.True(t, res.retried)
+	require.Equal(t, []string{"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"}, conf.ServiceRouteHeaders)
+	require.Equal(t, []string{
+		"<sip:configured-proxy.example.com;lr>",
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, outbound.routeHeaders)
+}
+
 func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

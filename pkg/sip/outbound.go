@@ -219,14 +219,13 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	}
 	call.stats.Update()
 	call.cc = c.newOutbound(log, id, fromURI, contact, sipConf.displayName, call.setAttrsToHeaders)
+	call.cc.configuredRouteHeaders = cloneRouteHeaders(sipConf.routeHeaders)
+	call.cc.routeRegisteredInviteToRegistrar = providerProfile.RouteRegisteredInviteToRegistrar
 	call.log = call.log.WithValues("jitterBuf", call.jitterBuf, "sipCallID", call.cc.callID)
 	call.cc.directProviderAuthConfigError = providerProfile.DirectAuthFailureIsConfigError &&
 		(sipConf.registerMode == outboundRegisterModeDisabled || sipConf.registerMode == outboundRegisterModeAuto)
 	if regProfile != nil {
-		call.cc.routeHeaders = appendRouteHeaders(sipConf.routeHeaders, regProfile.ServiceRouteHeaders)
-		if providerProfile.RouteRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
-			call.cc.routeHeaders = appendRouteHeaders(call.cc.routeHeaders, []string{registrationRouteHeader(regProfile)})
-		}
+		call.cc.routeHeaders = registeredInviteRouteHeaders(sipConf.routeHeaders, regProfile, providerProfile.RouteRegisteredInviteToRegistrar)
 	} else {
 		call.cc.routeHeaders = cloneRouteHeaders(sipConf.routeHeaders)
 	}
@@ -1045,13 +1044,15 @@ func (c *Client) newOutbound(log logger.Logger, id LocalTag, from, contact URI, 
 }
 
 type sipOutbound struct {
-	log                           logger.Logger
-	c                             *Client
-	id                            LocalTag
-	from                          *sip.FromHeader
-	contact                       *sip.ContactHeader
-	routeHeaders                  []string
-	directProviderAuthConfigError bool
+	log                              logger.Logger
+	c                                *Client
+	id                               LocalTag
+	from                             *sip.FromHeader
+	contact                          *sip.ContactHeader
+	routeHeaders                     []string
+	configuredRouteHeaders           []string
+	routeRegisteredInviteToRegistrar bool
+	directProviderAuthConfigError    bool
 
 	mu         sync.RWMutex
 	tag        RemoteTag
@@ -1331,14 +1332,16 @@ func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProf
 	if !shouldRetryInviteAfterFreshRegister(resp) {
 		return false, nil
 	}
+	forceRegisterRetry := serviceNotAuthorised(resp)
 	age, ok := c.c.registrationManager.freshSuccessfulRegisterAge(regProfile.cacheKey(), freshRegisterInviteRetry)
-	if !ok {
+	if !forceRegisterRetry && !ok {
 		return false, nil
 	}
 	c.log.Infow("retrying SIP INVITE after fresh REGISTER",
 		"retry_reason", "fresh_register_temporary_failure",
 		"original_status", resp.StatusCode,
 		"fresh_register_age_ms", age.Milliseconds(),
+		"force_register_retry", forceRegisterRetry,
 		"retry_attempt", 1,
 	)
 	timer := time.NewTimer(inviteRetryAfterFreshRegisterDelay)
@@ -1352,6 +1355,7 @@ func (c *sipOutbound) retryInviteAfterFreshRegister(ctx context.Context, regProf
 		if err := c.c.forceRegister(ctx, regProfile, password); err != nil {
 			return false, err
 		}
+		c.routeHeaders = registeredInviteRouteHeaders(c.configuredRouteHeaders, regProfile, c.routeRegisteredInviteToRegistrar)
 		return true, nil
 	case <-ctx.Done():
 		return false, ctx.Err()
@@ -1368,6 +1372,9 @@ func shouldRetryInviteAfterFreshRegister(resp *sip.Response) bool {
 	case sip.StatusTemporarilyUnavailable, sip.StatusServiceUnavailable:
 		return true
 	case sip.StatusForbidden:
+		if serviceNotAuthorised(resp) {
+			return true
+		}
 		body := strings.ToLower(string(resp.Body()))
 		return strings.Contains(body, "<ims-3gpp") &&
 			strings.Contains(body, "<alternative-service>") &&
@@ -1375,6 +1382,32 @@ func shouldRetryInviteAfterFreshRegister(resp *sip.Response) bool {
 	default:
 		return false
 	}
+}
+
+func registeredInviteRouteHeaders(configured []string, regProfile *ResolvedRegistrationConfig, routeRegisteredInviteToRegistrar bool) []string {
+	if regProfile == nil {
+		return cloneRouteHeaders(configured)
+	}
+	routes := appendRouteHeaders(configured, regProfile.ServiceRouteHeaders)
+	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
+		routes = appendRouteHeaders(routes, []string{registrationRouteHeader(regProfile)})
+	}
+	return routes
+}
+
+func serviceNotAuthorised(resp *sip.Response) bool {
+	if resp == nil {
+		return false
+	}
+	for _, h := range resp.GetHeaders("Warning") {
+		if h == nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(h.Value()), "service not authorised") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *sipOutbound) AcceptBye(req *sip.Request, tx sip.ServerTransaction) {
