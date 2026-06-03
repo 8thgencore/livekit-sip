@@ -298,10 +298,8 @@ func (s *Service) OnSessionEnd(ctx context.Context, callIdentifier *sip.CallIden
 		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "forbidden")
 	case isOutboundTrunkFailure(callInfo):
 		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "trunk failure")
-	case sip.ShouldDeleteOutboundTrunkAfterCall(callInfo.GetToUri().GetHost()):
-		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "provider configured")
 	default:
-		return
+		s.deleteOutboundTrunk(ctx, callID, callInfo.GetTrunkId(), reason, "call completed")
 	}
 }
 
