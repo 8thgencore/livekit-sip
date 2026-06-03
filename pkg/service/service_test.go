@@ -151,7 +151,7 @@ func TestOnSessionEndDoesNotDeleteWithoutSIPClient(t *testing.T) {
 	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoWithError("max auth retry attempts reached for SIP invite"), "invite-failed")
 }
 
-func TestOnSessionEndDeletesSipuniOutboundTrunk(t *testing.T) {
+func TestOnSessionEndDeletesOutboundTrunkAfterCall(t *testing.T) {
 	deleter := &fakeSIPTrunkClient{}
 	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
 
@@ -160,22 +160,22 @@ func TestOnSessionEndDeletesSipuniOutboundTrunk(t *testing.T) {
 	require.Equal(t, []string{"ST_test"}, deleter.deleted)
 }
 
-func TestOnSessionEndDoesNotDeleteNonSipuniOutboundTrunk(t *testing.T) {
+func TestOnSessionEndDeletesNonSipuniOutboundTrunkAfterCall(t *testing.T) {
 	deleter := &fakeSIPTrunkClient{}
 	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
 
 	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoForHost("login.mtt.ru"), "bye")
 
-	require.Empty(t, deleter.deleted)
+	require.Equal(t, []string{"ST_test"}, deleter.deleted)
 }
 
-func TestOnSessionEndDoesNotDeleteUiscomOutboundTrunk(t *testing.T) {
+func TestOnSessionEndDeletesUiscomOutboundTrunkAfterCall(t *testing.T) {
 	deleter := &fakeSIPTrunkClient{}
 	svc := &Service{log: logger.GetLogger(), sipClient: deleter}
 
 	svc.OnSessionEnd(context.Background(), nil, outboundCallInfoForHost("pbx.uiscom.ru"), "bye")
 
-	require.Empty(t, deleter.deleted)
+	require.Equal(t, []string{"ST_test"}, deleter.deleted)
 }
 
 func outboundCallInfoWithError(errText string) *livekit.SIPCallInfo {

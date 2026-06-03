@@ -186,7 +186,7 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, uiscom.AllowRegisteredInviteDirectFallback)
 	require.False(t, uiscom.DeleteTrunkAfterCall)
 	require.True(t, uiscom.DefaultG711Only)
-	require.False(t, ShouldDeleteOutboundTrunkAfterCall("pbx.uiscom.ru:5060"))
+	require.True(t, ShouldDeleteOutboundTrunkAfterCall("pbx.uiscom.ru:5060"))
 
 	plusofon := outboundProviderProfileForAddress("160907.voice.plusofon.ru:5060")
 	require.Equal(t, "plusofon", plusofon.ID)
@@ -240,6 +240,8 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.False(t, unknown.DeleteTrunkAfterCall)
 	require.Equal(t, outboundProviderQueueScopeTrunk, unknown.OutboundQueueScope)
 	require.Equal(t, 1, unknown.OutboundMaxConcurrentCalls)
+	require.True(t, ShouldDeleteOutboundTrunkAfterCall("sip.unknown.example:5060"))
+	require.False(t, ShouldDeleteOutboundTrunkAfterCall(""))
 
 	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
 	require.Equal(t, "universal", nearMiss.ID)

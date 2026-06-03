@@ -118,7 +118,7 @@ func (p *outboundProviderProfile) applyDefaults() {
 }
 
 func ShouldDeleteOutboundTrunkAfterCall(address string) bool {
-	return outboundProviderProfileForAddress(address).DeleteTrunkAfterCall
+	return strings.TrimSpace(address) != ""
 }
 
 func normalizeSIPHost(address string) string {
