@@ -227,7 +227,7 @@ func TestEnsureRegisteredUsesCachedServiceRouteWithoutPassword(t *testing.T) {
 
 	cachedConf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
 		address: "ip.beeline.ru:5060",
-		host:    "ip.beeline.ru",
+		host:    "81.29.140.248",
 		from:    mockAuthUser,
 		routeHeaders: []string{
 			"<sip:ip.beeline.ru:5060;transport=udp;lr>",

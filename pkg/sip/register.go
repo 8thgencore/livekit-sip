@@ -75,6 +75,7 @@ type registrationState struct {
 	lastSuccessAt       time.Time
 	serviceRouteHeaders []string
 	identityKey         string
+	looseIdentityKey    string
 	inflight            chan struct{}
 	refreshStarted      bool
 	err                 error
@@ -101,10 +102,18 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 		m.mu.Lock()
 		st := m.states[key]
 		if st == nil {
-			st = &registrationState{identityKey: conf.identityCacheKey()}
+			st = &registrationState{
+				identityKey:      conf.identityCacheKey(),
+				looseIdentityKey: conf.looseIdentityCacheKey(),
+			}
 			m.states[key] = st
-		} else if st.identityKey == "" {
-			st.identityKey = conf.identityCacheKey()
+		} else {
+			if st.identityKey == "" {
+				st.identityKey = conf.identityCacheKey()
+			}
+			if st.looseIdentityKey == "" {
+				st.looseIdentityKey = conf.looseIdentityCacheKey()
+			}
 		}
 		now := time.Now()
 		st.lastUsedAt = now
@@ -246,10 +255,18 @@ func (m *RegistrationManager) refresh(ctx context.Context, c *Client, key string
 		m.mu.Lock()
 		st := m.states[key]
 		if st == nil {
-			st = &registrationState{identityKey: conf.identityCacheKey()}
+			st = &registrationState{
+				identityKey:      conf.identityCacheKey(),
+				looseIdentityKey: conf.looseIdentityCacheKey(),
+			}
 			m.states[key] = st
-		} else if st.identityKey == "" {
-			st.identityKey = conf.identityCacheKey()
+		} else {
+			if st.identityKey == "" {
+				st.identityKey = conf.identityCacheKey()
+			}
+			if st.looseIdentityKey == "" {
+				st.looseIdentityKey = conf.looseIdentityCacheKey()
+			}
 		}
 		if st.inflight != nil {
 			wait := st.inflight
@@ -313,6 +330,7 @@ func (m *RegistrationManager) cachedRegistration(ctx context.Context, conf *Reso
 	}
 	key := conf.cacheKey()
 	identityKey := conf.identityCacheKey()
+	looseIdentityKey := conf.looseIdentityCacheKey()
 	for {
 		m.mu.Lock()
 		var candidates []*registrationState
@@ -321,7 +339,11 @@ func (m *RegistrationManager) cachedRegistration(ctx context.Context, conf *Reso
 		}
 		if allowIdentityFallback && identityKey != "" {
 			for _, candidate := range m.states {
-				if candidate != nil && candidate.identityKey == identityKey && candidate != m.states[key] {
+				if candidate == nil || candidate == m.states[key] {
+					continue
+				}
+				if candidate.identityKey == identityKey ||
+					(looseIdentityKey != "" && candidate.looseIdentityKey == looseIdentityKey) {
 					candidates = append(candidates, candidate)
 				}
 			}
@@ -428,6 +450,19 @@ func (c *ResolvedRegistrationConfig) identityCacheKey() string {
 		c.ContactUser,
 		c.FromDomain,
 		c.AuthURI,
+	}, "|")
+}
+
+func (c *ResolvedRegistrationConfig) looseIdentityCacheKey() string {
+	if c == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		c.Registrar.GetDest(),
+		string(c.Transport),
+		c.AuthUsername,
+		c.AORUser,
+		c.ContactUser,
 	}, "|")
 }
 
