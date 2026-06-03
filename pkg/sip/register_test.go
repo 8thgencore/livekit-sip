@@ -201,6 +201,55 @@ func TestEnsureRegisteredBeelineRefreshesRegistrationOlderThanInviteMaxAge(t *te
 	}, res.conf.ServiceRouteHeaders)
 }
 
+func TestEnsureRegisteredUsesCachedServiceRouteWithoutPassword(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	registeredConf := sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), registeredConf)
+		done <- err
+	}()
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+	require.NoError(t, <-done)
+
+	cachedConf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		from:    mockAuthUser,
+		routeHeaders: []string{
+			"<sip:ip.beeline.ru:5060;transport=udp;lr>",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cachedConf)
+	require.Equal(t, mockAuthUser, cachedConf.AuthUsername)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, cachedConf.ServiceRouteHeaders)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, registeredInviteRouteHeaders(cachedConf.RouteHeaders, cachedConf, true))
+
+	select {
+	case tx = <-sipClient.transactions:
+		t.Fatalf("unexpected REGISTER transaction for cached route lookup: %v", tx.req.Method)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestEnsureRegisteredKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

@@ -74,6 +74,7 @@ type registrationState struct {
 	lastUsedAt          time.Time
 	lastSuccessAt       time.Time
 	serviceRouteHeaders []string
+	identityKey         string
 	inflight            chan struct{}
 	refreshStarted      bool
 	err                 error
@@ -100,8 +101,10 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 		m.mu.Lock()
 		st := m.states[key]
 		if st == nil {
-			st = &registrationState{}
+			st = &registrationState{identityKey: conf.identityCacheKey()}
 			m.states[key] = st
+		} else if st.identityKey == "" {
+			st.identityKey = conf.identityCacheKey()
 		}
 		now := time.Now()
 		st.lastUsedAt = now
@@ -243,8 +246,10 @@ func (m *RegistrationManager) refresh(ctx context.Context, c *Client, key string
 		m.mu.Lock()
 		st := m.states[key]
 		if st == nil {
-			st = &registrationState{}
+			st = &registrationState{identityKey: conf.identityCacheKey()}
 			m.states[key] = st
+		} else if st.identityKey == "" {
+			st.identityKey = conf.identityCacheKey()
 		}
 		if st.inflight != nil {
 			wait := st.inflight
@@ -300,6 +305,55 @@ func (m *RegistrationManager) markSuccessfulRegister(key string, at time.Time) {
 		m.states[key] = st
 	}
 	st.lastSuccessAt = at
+}
+
+func (m *RegistrationManager) cachedRegistration(ctx context.Context, conf *ResolvedRegistrationConfig, allowIdentityFallback bool, requireServiceRoute bool) (bool, error) {
+	if m == nil || conf == nil {
+		return false, nil
+	}
+	key := conf.cacheKey()
+	identityKey := conf.identityCacheKey()
+	for {
+		m.mu.Lock()
+		var candidates []*registrationState
+		if st := m.states[key]; st != nil {
+			candidates = append(candidates, st)
+		}
+		if allowIdentityFallback && identityKey != "" {
+			for _, candidate := range m.states {
+				if candidate != nil && candidate.identityKey == identityKey && candidate != m.states[key] {
+					candidates = append(candidates, candidate)
+				}
+			}
+		}
+		if len(candidates) == 0 {
+			m.mu.Unlock()
+			return false, nil
+		}
+		now := time.Now()
+		var wait chan struct{}
+		for _, st := range candidates {
+			st.lastUsedAt = now
+			if st.inflight != nil {
+				wait = st.inflight
+				break
+			}
+			if st.expiresAt.After(now.Add(conf.RefreshBefore)) && (!requireServiceRoute || len(st.serviceRouteHeaders) != 0) {
+				conf.ServiceRouteHeaders = cloneRouteHeaders(st.serviceRouteHeaders)
+				m.mu.Unlock()
+				return true, nil
+			}
+		}
+		m.mu.Unlock()
+		if wait == nil {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-wait:
+		}
+	}
 }
 
 func (m *RegistrationManager) freshSuccessfulRegisterAge(key string, maxAge time.Duration) (time.Duration, bool) {
@@ -362,11 +416,32 @@ func (c *ResolvedRegistrationConfig) cacheKey() string {
 	}, "|")
 }
 
+func (c *ResolvedRegistrationConfig) identityCacheKey() string {
+	if c == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		c.Registrar.GetDest(),
+		string(c.Transport),
+		c.AuthUsername,
+		c.AORUser,
+		c.ContactUser,
+		c.FromDomain,
+		c.AuthURI,
+	}, "|")
+}
+
 func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig) (*ResolvedRegistrationConfig, error) {
 	if c == nil || c.sipCli == nil || c.sconf == nil {
 		return nil, nil
 	}
-	if sipConf.user == "" || sipConf.pass == "" || sipConf.address == "" {
+	if sipConf.address == "" {
+		return nil, nil
+	}
+	if sipConf.user == "" {
+		sipConf.user = sipConf.from
+	}
+	if sipConf.user == "" {
 		return nil, nil
 	}
 
@@ -383,6 +458,13 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 
 	contact := c.ContactURI(conf.Transport)
 	contact.User = conf.ContactUser
+	if sipConf.pass == "" {
+		ok, err := c.registrationManager.cachedRegistration(ctx, conf, true, true)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return conf, nil
+	}
 	return conf, c.registrationManager.ensure(ctx, c, conf, sipConf.pass, contact)
 }
 

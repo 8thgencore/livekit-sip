@@ -1388,11 +1388,30 @@ func registeredInviteRouteHeaders(configured []string, regProfile *ResolvedRegis
 	if regProfile == nil {
 		return cloneRouteHeaders(configured)
 	}
-	routes := appendRouteHeaders(configured, regProfile.ServiceRouteHeaders)
+	configuredRoutes := cloneRouteHeaders(configured)
+	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) != 0 {
+		configuredRoutes = removeRouteHeader(configuredRoutes, registrationRouteHeader(regProfile))
+	}
+	routes := appendRouteHeaders(configuredRoutes, regProfile.ServiceRouteHeaders)
 	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
 		routes = appendRouteHeaders(routes, []string{registrationRouteHeader(regProfile)})
 	}
 	return routes
+}
+
+func removeRouteHeader(routes []string, remove string) []string {
+	remove = strings.TrimSpace(remove)
+	if len(routes) == 0 || remove == "" {
+		return routes
+	}
+	out := routes[:0]
+	for _, route := range routes {
+		if strings.TrimSpace(route) == remove {
+			continue
+		}
+		out = append(out, route)
+	}
+	return out
 }
 
 func serviceNotAuthorised(resp *sip.Response) bool {
