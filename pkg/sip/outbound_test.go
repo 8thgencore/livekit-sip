@@ -1021,6 +1021,48 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.Error(t, <-done)
 }
 
+func TestOutboundDisabledUsesCachedBeelineServiceRouteProfile(t *testing.T) {
+	const registeredUser = "9063671384"
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	registerDone := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "ip.beeline.ru:5060",
+			host:    "ip.beeline.ru",
+			user:    registeredUser,
+			pass:    "test-password",
+		})
+		registerDone <- err
+	}()
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	ok := sip.NewResponseFromRequest(registerTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	sendTestResponse(t, registerTx, ok)
+	require.NoError(t, <-registerDone)
+
+	regProfile := client.cachedRegisteredRouteProfile(context.Background(), sipOutboundConfig{
+		address:      "ip.beeline.ru:5060",
+		host:         "ip.beeline.ru",
+		from:         registeredUser,
+		registerMode: outboundRegisterModeDisabled,
+	}, "", TransportUDP, logger.GetLogger())
+	require.NotNil(t, regProfile)
+	require.Equal(t, registeredUser, regProfile.AuthUsername)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, registeredInviteRouteHeaders(nil, regProfile, true))
+
+	select {
+	case tx := <-sipClient.transactions:
+		t.Fatalf("unexpected REGISTER transaction for cached route profile lookup: %v", tx.req.Method)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

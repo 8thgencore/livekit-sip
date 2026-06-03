@@ -182,6 +182,9 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 			regProfile = nil
 		}
 	}
+	if regProfile == nil && providerProfile.RouteRegisteredInviteToRegistrar {
+		regProfile = c.cachedRegisteredRouteProfile(ctx, sipConf, defaultHost, tr, log)
+	}
 	if regProfile != nil {
 		if regProfile.FromDomain != "" && defaultHost == "" {
 			sipConf.host = regProfile.FromDomain
@@ -263,6 +266,33 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 	defer c.cmu.Unlock()
 	c.activeCalls[id] = call
 	return call, nil
+}
+
+func (c *Client) cachedRegisteredRouteProfile(ctx context.Context, sipConf sipOutboundConfig, defaultHost string, tr Transport, log logger.Logger) *ResolvedRegistrationConfig {
+	cachedSipConf := sipConf
+	cachedSipConf.host = defaultHost
+	cachedSipConf.pass = ""
+	if cachedSipConf.user == "" {
+		cachedSipConf.user = sipConf.from
+	}
+	regProfile, err := c.ensureRegistered(ctx, cachedSipConf)
+	if err != nil {
+		log.Warnw("SIP registered route cache lookup failed", err,
+			"address", sipConf.address,
+			"transport", tr,
+			"username", cachedSipConf.user,
+		)
+		return nil
+	}
+	if regProfile != nil {
+		log.Infow("SIP registered route cache hit",
+			"address", sipConf.address,
+			"transport", tr,
+			"username", cachedSipConf.user,
+			"serviceRoutes", regProfile.ServiceRouteHeaders,
+		)
+	}
+	return regProfile
 }
 
 func (c *outboundCall) setAttrsToHeaders(headers map[string]string) map[string]string {
