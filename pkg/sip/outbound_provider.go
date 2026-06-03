@@ -77,12 +77,11 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		AllowRegisteredInviteDirectFallback: true,
 	},
 	"ip.beeline.ru": {
-		ID:                                    "beeline",
-		DefaultG711Only:                       true,
-		RouteRegisteredInviteToRegistrar:      true,
-		RouteRegistrationToRegistrar:          true,
-		AlwaysRefreshRegistrationBeforeInvite: true,
-		RegisterInviteSettlingDelay:           3 * time.Second,
+		ID:                               "beeline",
+		DefaultG711Only:                  true,
+		RouteRegisteredInviteToRegistrar: true,
+		RouteRegistrationToRegistrar:     true,
+		RegisterInviteSettlingDelay:      3 * time.Second,
 	},
 	"sipuni.ru": {
 		ID:                                  "sipuni",

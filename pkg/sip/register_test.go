@@ -2,12 +2,14 @@ package sip
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/icholy/digest"
 	"github.com/stretchr/testify/require"
 
+	emisip "github.com/emiago/sipgo/sip"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/sipgo/sip"
 )
@@ -100,7 +102,7 @@ func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestEnsureRegisteredBeelineRefreshesBeforeEachInvite(t *testing.T) {
+func TestEnsureRegisteredBeelineCachesRegistrationUntilRefreshWindow(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -121,7 +123,9 @@ func TestEnsureRegisteredBeelineRefreshesBeforeEachInvite(t *testing.T) {
 	firstRoutes := firstTx.req.GetHeaders("Route")
 	require.Len(t, firstRoutes, 1)
 	require.Equal(t, "<sip:ip.beeline.ru:5060;transport=udp;lr>", firstRoutes[0].Value())
-	require.NoError(t, firstTx.transaction.SendResponse(sip.NewResponseFromRequest(firstTx.req, sip.StatusOK, "OK", nil)))
+	ok := sip.NewResponseFromRequest(firstTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	require.NoError(t, firstTx.transaction.SendResponse(ok))
 	require.NoError(t, <-firstDone)
 
 	secondDone := make(chan error, 1)
@@ -129,13 +133,12 @@ func TestEnsureRegisteredBeelineRefreshesBeforeEachInvite(t *testing.T) {
 		_, err := client.ensureRegistered(context.Background(), sipConf)
 		secondDone <- err
 	}()
-	secondTx := waitTransaction(t, sipClient)
-	require.Equal(t, sip.REGISTER, secondTx.req.Method)
-	secondRoutes := secondTx.req.GetHeaders("Route")
-	require.Len(t, secondRoutes, 1)
-	require.Equal(t, "<sip:ip.beeline.ru:5060;transport=udp;lr>", secondRoutes[0].Value())
-	require.NoError(t, secondTx.transaction.SendResponse(sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)))
 	require.NoError(t, <-secondDone)
+	select {
+	case tx := <-sipClient.transactions:
+		t.Fatalf("unexpected immediate REGISTER refresh transaction: %v", tx.req.Method)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestEnsureRegisteredKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
@@ -273,6 +276,32 @@ func TestEnsureRegisteredStoresServiceRouteHeaders(t *testing.T) {
 		"<sip:ims-edge-1.example.com;lr>",
 		"<sip:ims-edge-2.example.com;lr>",
 	}, res.conf.ServiceRouteHeaders)
+}
+
+func TestServiceRouteHeadersParsesBeelineRegisterResponse(t *testing.T) {
+	raw := strings.Join([]string{
+		"SIP/2.0 200 OK",
+		"Via: SIP/2.0/UDP 81.29.140.248:15060;rport=15060;received=81.29.140.248;branch=z9hG4bK.1ykXqbaREIz80Ar5;alias",
+		"To: <sip:9063671384@ip.beeline.ru>;tag=0a606b8e87cc800c51b22fb8c4896403-ffbd86ee",
+		"From: <sip:9063671384@ip.beeline.ru>;tag=hifxE7HUUFztFsPI",
+		"Call-ID: reg_kkfQxtaK4gfK",
+		"CSeq: 2 REGISTER",
+		"Contact:  <sip:9063671384@81.29.140.248:15060;transport=udp>;expires=150",
+		"P-Associated-URI: <sip:9063671384@ip.beeline.ru>",
+		"Server: ES-S-CSCF",
+		"Content-Length: 0",
+		"Service-Route: <sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+		"",
+		"",
+	}, "\r\n")
+
+	msg, err := emisip.ParseMessage([]byte(raw))
+	require.NoError(t, err)
+	resp, ok := msg.(*sip.Response)
+	require.True(t, ok)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, serviceRouteHeaders(resp))
 }
 
 func TestEnsureRegisteredWithoutCredentialsSkipsRegister(t *testing.T) {
@@ -499,6 +528,29 @@ func TestRegistrationBackgroundRefreshDoesNotSpinOnTinyExpiration(t *testing.T) 
 		t.Fatalf("unexpected immediate REGISTER refresh transaction: %v", tx.req.Method)
 	case <-time.After(2 * time.Second):
 	}
+}
+
+func TestRegistrationBackgroundRefreshRunsThirtySecondsBeforeExpiration(t *testing.T) {
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: mockRegistrarHost + ":5060",
+		host:    mockRegistrarHost,
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	})
+	require.NoError(t, err)
+
+	m := NewRegistrationManager()
+	key := conf.cacheKey()
+	now := time.Now()
+	m.states[key] = &registrationState{
+		expiresAt:  now.Add(150 * time.Second),
+		lastUsedAt: now,
+	}
+
+	wait, stop := m.nextRefreshWait(key, conf)
+	require.False(t, stop)
+	require.GreaterOrEqual(t, wait, 119*time.Second)
+	require.LessOrEqual(t, wait, 120*time.Second)
 }
 
 func TestEnsureRegisteredStoresSuccessfulRegisterTime(t *testing.T) {

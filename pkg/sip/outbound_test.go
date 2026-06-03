@@ -214,12 +214,12 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 	require.True(t, beeline.DefaultG711Only)
 	require.True(t, beeline.RouteRegisteredInviteToRegistrar)
 	require.True(t, beeline.RouteRegistrationToRegistrar)
-	require.True(t, beeline.AlwaysRefreshRegistrationBeforeInvite)
+	require.False(t, beeline.AlwaysRefreshRegistrationBeforeInvite)
 	require.Equal(t, 3*time.Second, beeline.RegisterInviteSettlingDelay)
 
 	beelineWithTransport := outboundProviderProfileForAddress("ip.beeline.ru:5060;transport=udp")
 	require.Equal(t, "beeline", beelineWithTransport.ID)
-	require.True(t, beelineWithTransport.AlwaysRefreshRegistrationBeforeInvite)
+	require.False(t, beelineWithTransport.AlwaysRefreshRegistrationBeforeInvite)
 
 	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
 	require.Equal(t, "sipuni", sipuni.ID)
@@ -739,6 +739,22 @@ func TestRetryInviteAfterServiceNotAuthorisedReregistersAndUsesServiceRoute(t *t
 		"<sip:configured-proxy.example.com;lr>",
 		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
 	}, outbound.routeHeaders)
+}
+
+func TestRegisteredInviteRouteHeadersPreferServiceRouteOverRegistrarFallback(t *testing.T) {
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    "9063671384",
+		pass:    "test-password",
+	})
+	require.NoError(t, err)
+	conf.ServiceRouteHeaders = []string{"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"}
+
+	require.Equal(t, []string{
+		"<sip:configured-proxy.example.com;lr>",
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, registeredInviteRouteHeaders([]string{"<sip:configured-proxy.example.com;lr>"}, conf, true))
 }
 
 func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {
