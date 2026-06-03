@@ -16,6 +16,7 @@ type outboundProviderProfile struct {
 	RouteRegisteredInviteToRegistrar      bool
 	RouteRegistrationToRegistrar          bool
 	AlwaysRefreshRegistrationBeforeInvite bool
+	MaxRegistrationAgeBeforeInvite        time.Duration
 	RegisterInviteSettlingDelay           time.Duration
 	OutboundQueueScope                    outboundProviderQueueScope
 	OutboundMaxConcurrentCalls            int
@@ -81,6 +82,7 @@ var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
 		DefaultG711Only:                  true,
 		RouteRegisteredInviteToRegistrar: true,
 		RouteRegistrationToRegistrar:     true,
+		MaxRegistrationAgeBeforeInvite:   30 * time.Second,
 		RegisterInviteSettlingDelay:      3 * time.Second,
 	},
 	"sipuni.ru": {

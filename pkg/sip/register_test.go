@@ -141,6 +141,66 @@ func TestEnsureRegisteredBeelineCachesRegistrationUntilRefreshWindow(t *testing.
 	}
 }
 
+func TestEnsureRegisteredBeelineRefreshesRegistrationOlderThanInviteMaxAge(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	sipConf := sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := client.ensureRegistered(context.Background(), sipConf)
+		firstDone <- err
+	}()
+	firstTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, firstTx.req.Method)
+	ok := sip.NewResponseFromRequest(firstTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	require.NoError(t, firstTx.transaction.SendResponse(ok))
+	require.NoError(t, <-firstDone)
+
+	conf, err := resolveRegistrationConfig(sipConf)
+	require.NoError(t, err)
+	profile := outboundProviderProfileForAddress(sipConf.address)
+	conf.MaxAgeBeforeInvite = profile.MaxRegistrationAgeBeforeInvite
+	if profile.RouteRegistrationToRegistrar {
+		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
+	}
+
+	client.registrationManager.mu.Lock()
+	st := client.registrationManager.states[conf.cacheKey()]
+	require.NotNil(t, st)
+	st.lastSuccessAt = time.Now().Add(-31 * time.Second)
+	client.registrationManager.mu.Unlock()
+
+	type ensureResult struct {
+		conf *ResolvedRegistrationConfig
+		err  error
+	}
+	secondDone := make(chan ensureResult, 1)
+	go func() {
+		regConf, err := client.ensureRegistered(context.Background(), sipConf)
+		secondDone <- ensureResult{conf: regConf, err: err}
+	}()
+	secondTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, secondTx.req.Method)
+	ok = sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	require.NoError(t, secondTx.transaction.SendResponse(ok))
+	res := <-secondDone
+	require.NoError(t, res.err)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, res.conf.ServiceRouteHeaders)
+}
+
 func TestEnsureRegisteredKeepsProxyAuthorizationWhenWWWAuthenticateFollows(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)

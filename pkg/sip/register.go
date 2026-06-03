@@ -64,6 +64,7 @@ type ResolvedRegistrationConfig struct {
 	Expires                   time.Duration
 	RefreshBefore             time.Duration
 	AlwaysRefreshBeforeInvite bool
+	MaxAgeBeforeInvite        time.Duration
 	InviteOnRegisterFailure   bool
 	Registrar                 URI
 }
@@ -102,8 +103,12 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 			st = &registrationState{}
 			m.states[key] = st
 		}
-		st.lastUsedAt = time.Now()
-		if !conf.AlwaysRefreshBeforeInvite && st.inflight == nil && st.expiresAt.After(time.Now().Add(conf.RefreshBefore)) {
+		now := time.Now()
+		st.lastUsedAt = now
+		if !conf.AlwaysRefreshBeforeInvite &&
+			st.inflight == nil &&
+			st.expiresAt.After(now.Add(conf.RefreshBefore)) &&
+			!registrationTooOldForInvite(st, conf, now) {
 			conf.ServiceRouteHeaders = cloneRouteHeaders(st.serviceRouteHeaders)
 			m.ensureRefreshLoopLocked(c, key, conf, password, contact, st)
 			m.mu.Unlock()
@@ -147,6 +152,16 @@ func (m *RegistrationManager) ensureRefreshLoopLocked(c *Client, key string, con
 	}
 	st.refreshStarted = true
 	go m.refreshLoop(c, key, conf.clone(), password, contact)
+}
+
+func registrationTooOldForInvite(st *registrationState, conf *ResolvedRegistrationConfig, now time.Time) bool {
+	if st == nil || conf == nil || conf.MaxAgeBeforeInvite <= 0 {
+		return false
+	}
+	if st.lastSuccessAt.IsZero() {
+		return true
+	}
+	return now.Sub(st.lastSuccessAt) > conf.MaxAgeBeforeInvite
 }
 
 func (m *RegistrationManager) refreshLoop(c *Client, key string, conf *ResolvedRegistrationConfig, password string, contact URI) {
@@ -361,6 +376,7 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 	}
 	providerProfile := outboundProviderProfileForAddress(sipConf.address)
 	conf.AlwaysRefreshBeforeInvite = providerProfile.AlwaysRefreshRegistrationBeforeInvite
+	conf.MaxAgeBeforeInvite = providerProfile.MaxRegistrationAgeBeforeInvite
 	if providerProfile.RouteRegistrationToRegistrar {
 		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
 	}
