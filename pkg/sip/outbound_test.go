@@ -17,6 +17,7 @@ package sip
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -710,6 +711,27 @@ func TestRegisteredInviteRouteHeadersPreferServiceRouteOverRegistrarFallback(t *
 		"<sip:configured-proxy.example.com;lr>",
 		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
 	}, registeredInviteRouteHeaders([]string{"<sip:configured-proxy.example.com;lr>"}, conf, true))
+}
+
+func TestRegisteredInviteRouteHeadersDoNotFallbackToRegistrarWithoutServiceRoute(t *testing.T) {
+	conf, err := resolveRegistrationConfig(sipOutboundConfig{
+		address: "cmp-ekb.mangosip.ru:5060",
+		host:    "cmp-ekb.mangosip.ru",
+		user:    "user18",
+		pass:    "test-password",
+	})
+	require.NoError(t, err)
+	conf.RouteRegistrar = URI{
+		Host: "81.88.86.37",
+		Addr: netip.AddrPortFrom(netip.Addr{}, 5060),
+	}
+
+	require.Equal(t, []string{
+		"<sip:configured-proxy.example.com;lr>",
+	}, registeredInviteRouteHeaders([]string{
+		"<sip:configured-proxy.example.com;lr>",
+		"<sip:81.88.86.37:5060;transport=udp;lr>",
+	}, conf, true))
 }
 
 func TestOutboundInviteDigestURIUsesRequestURIWithPort(t *testing.T) {

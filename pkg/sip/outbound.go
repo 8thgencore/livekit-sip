@@ -1422,11 +1422,7 @@ func registeredInviteRouteHeaders(configured []string, regProfile *ResolvedRegis
 	if routeRegisteredInviteToRegistrar {
 		configuredRoutes = removeRegistrationRouteHeaders(configuredRoutes, regProfile)
 	}
-	routes := appendRouteHeaders(configuredRoutes, regProfile.ServiceRouteHeaders)
-	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
-		routes = appendRouteHeaders(routes, []string{registrationRouteHeader(regProfile)})
-	}
-	return routes
+	return appendRouteHeaders(configuredRoutes, regProfile.ServiceRouteHeaders)
 }
 
 func removeRegistrationRouteHeaders(routes []string, conf *ResolvedRegistrationConfig) []string {
