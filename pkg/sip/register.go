@@ -3,6 +3,7 @@ package sip
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,8 @@ type ResolvedRegistrationConfig struct {
 	RefreshBefore             time.Duration
 	AlwaysRefreshBeforeInvite bool
 	MaxAgeBeforeInvite        time.Duration
+	RouteRegistrar            URI
+	DisableCache              bool
 	InviteOnRegisterFailure   bool
 	Registrar                 URI
 }
@@ -487,6 +490,12 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 	providerProfile := outboundProviderProfileForAddress(sipConf.address)
 	conf.AlwaysRefreshBeforeInvite = providerProfile.AlwaysRefreshRegistrationBeforeInvite
 	conf.MaxAgeBeforeInvite = providerProfile.MaxRegistrationAgeBeforeInvite
+	conf.DisableCache = providerProfile.DisableRegistrationCache
+	if providerProfile.ResolveRegistrationToIP {
+		if err := c.resolveRegistrationToIP(ctx, conf); err != nil {
+			return nil, err
+		}
+	}
 	if providerProfile.RouteRegistrationToRegistrar {
 		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
 	}
@@ -494,6 +503,9 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 	contact := c.ContactURI(conf.Transport)
 	contact.User = conf.ContactUser
 	if sipConf.pass == "" {
+		if conf.DisableCache {
+			return nil, nil
+		}
 		ok, err := c.registrationManager.cachedRegistration(ctx, conf, true, true)
 		if err != nil || !ok {
 			return nil, err
@@ -501,6 +513,66 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 		return conf, nil
 	}
 	return conf, c.registrationManager.ensure(ctx, c, conf, sipConf.pass, contact)
+}
+
+func (c *Client) resolveRegistrationToIP(ctx context.Context, conf *ResolvedRegistrationConfig) error {
+	if c == nil || conf == nil {
+		return nil
+	}
+	host := conf.Registrar.GetHost()
+	if host == "" {
+		return nil
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		conf.RouteRegistrar = conf.Registrar
+		conf.RouteRegistrar.Host = addr.String()
+		return nil
+	}
+	resolver := c.resolveRegistrar
+	if resolver == nil {
+		resolver = defaultRegistrarResolver
+	}
+	addrs, err := resolver(ctx, host)
+	if err != nil {
+		return err
+	}
+	addr, ok := selectPublicRegistrarIP(addrs)
+	if !ok {
+		return fmt.Errorf("no public IP addresses found for SIP registrar %q", host)
+	}
+	port := uint16(conf.Registrar.GetPort())
+	conf.Registrar.Addr = netip.AddrPortFrom(addr, port)
+	conf.RouteRegistrar = URI{
+		Host:      addr.String(),
+		Addr:      netip.AddrPortFrom(netip.Addr{}, port),
+		Transport: conf.Transport,
+	}
+	c.log.Infow("resolved SIP registrar",
+		"registrar", host,
+		"resolvedIP", addr.String(),
+		"dest", conf.Registrar.GetDest(),
+	)
+	return nil
+}
+
+func selectPublicRegistrarIP(addrs []netip.Addr) (netip.Addr, bool) {
+	var fallback netip.Addr
+	for _, addr := range addrs {
+		addr = addr.Unmap()
+		if !addr.IsValid() || !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() {
+			continue
+		}
+		if addr.Is4() {
+			return addr, true
+		}
+		if !fallback.IsValid() {
+			fallback = addr
+		}
+	}
+	if fallback.IsValid() {
+		return fallback, true
+	}
+	return netip.Addr{}, false
 }
 
 func (c *Client) forceRegister(ctx context.Context, conf *ResolvedRegistrationConfig, password string) error {
@@ -546,6 +618,7 @@ func resolveRegistrationConfig(sipConf sipOutboundConfig) (*ResolvedRegistration
 	if err != nil {
 		return nil, err
 	}
+	conf.RouteRegistrar = conf.Registrar
 	if conf.AORUser == "" {
 		return nil, psrpc.NewError(psrpc.InvalidArgument, errors.New("sip registration requires auth username"))
 	}

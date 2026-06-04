@@ -21,20 +21,20 @@ func TestOutboundTrunkQueueKey(t *testing.T) {
 	require.Equal(t, "addr:sip.example.com|from:1001", outboundTrunkQueueKey(req))
 }
 
-func TestOutboundTrunkQueueKeyUsesSipuniProviderAccount(t *testing.T) {
+func TestOutboundTrunkQueueKeyDoesNotUseProviderSpecificScope(t *testing.T) {
 	req := &rpc.InternalCreateSIPParticipantRequest{
 		SipTrunkId: "trunk-1",
 		Address:    "voip.sipuni.ru:5060",
 		Number:     "086992100073",
 	}
-	require.Equal(t, "provider:sipuni|from:086992100073", outboundTrunkQueueKey(req))
+	require.Equal(t, "id:trunk-1", outboundTrunkQueueKey(req))
 	require.Equal(t, 1, outboundTrunkQueueMaxConcurrentCalls(req))
 
 	req.SipTrunkId = "trunk-2"
-	require.Equal(t, "provider:sipuni|from:086992100073", outboundTrunkQueueKey(req))
+	require.Equal(t, "id:trunk-2", outboundTrunkQueueKey(req))
 
 	req.Number = "086992100074"
-	require.Equal(t, "provider:sipuni|from:086992100074", outboundTrunkQueueKey(req))
+	require.Equal(t, "id:trunk-2", outboundTrunkQueueKey(req))
 
 	req.Address = "pbx.uiscom.ru:5060"
 	require.Equal(t, "id:trunk-2", outboundTrunkQueueKey(req))

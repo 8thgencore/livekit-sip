@@ -102,7 +102,7 @@ func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestEnsureRegisteredBeelineCachesRegistrationUntilRefreshWindow(t *testing.T) {
+func TestEnsureRegisteredBeelineRefreshesRegistrationEveryTime(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -122,9 +122,11 @@ func TestEnsureRegisteredBeelineCachesRegistrationUntilRefreshWindow(t *testing.
 	require.Equal(t, sip.REGISTER, firstTx.req.Method)
 	firstRoutes := firstTx.req.GetHeaders("Route")
 	require.Len(t, firstRoutes, 1)
-	require.Equal(t, "<sip:ip.beeline.ru:5060;transport=udp;lr>", firstRoutes[0].Value())
+	require.Equal(t, "<sip:212.119.246.230:5060;transport=udp;lr>", firstRoutes[0].Value())
+	require.Equal(t, "212.119.246.230:5060", firstTx.req.Destination())
 	ok := sip.NewResponseFromRequest(firstTx.req, sip.StatusOK, "OK", nil)
 	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
 	require.NoError(t, firstTx.transaction.SendResponse(ok))
 	require.NoError(t, <-firstDone)
 
@@ -133,12 +135,14 @@ func TestEnsureRegisteredBeelineCachesRegistrationUntilRefreshWindow(t *testing.
 		_, err := client.ensureRegistered(context.Background(), sipConf)
 		secondDone <- err
 	}()
+	secondTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, secondTx.req.Method)
+	require.Equal(t, "212.119.246.230:5060", secondTx.req.Destination())
+	ok = sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	require.NoError(t, secondTx.transaction.SendResponse(ok))
 	require.NoError(t, <-secondDone)
-	select {
-	case tx := <-sipClient.transactions:
-		t.Fatalf("unexpected immediate REGISTER refresh transaction: %v", tx.req.Method)
-	case <-time.After(100 * time.Millisecond):
-	}
 }
 
 func TestEnsureRegisteredBeelineRefreshesRegistrationOlderThanInviteMaxAge(t *testing.T) {
@@ -165,20 +169,6 @@ func TestEnsureRegisteredBeelineRefreshesRegistrationOlderThanInviteMaxAge(t *te
 	require.NoError(t, firstTx.transaction.SendResponse(ok))
 	require.NoError(t, <-firstDone)
 
-	conf, err := resolveRegistrationConfig(sipConf)
-	require.NoError(t, err)
-	profile := outboundProviderProfileForAddress(sipConf.address)
-	conf.MaxAgeBeforeInvite = profile.MaxRegistrationAgeBeforeInvite
-	if profile.RouteRegistrationToRegistrar {
-		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
-	}
-
-	client.registrationManager.mu.Lock()
-	st := client.registrationManager.states[conf.cacheKey()]
-	require.NotNil(t, st)
-	st.lastSuccessAt = time.Now().Add(-31 * time.Second)
-	client.registrationManager.mu.Unlock()
-
 	type ensureResult struct {
 		conf *ResolvedRegistrationConfig
 		err  error
@@ -201,7 +191,89 @@ func TestEnsureRegisteredBeelineRefreshesRegistrationOlderThanInviteMaxAge(t *te
 	}, res.conf.ServiceRouteHeaders)
 }
 
-func TestEnsureRegisteredUsesCachedServiceRouteWithoutPassword(t *testing.T) {
+func TestEnsureRegisteredBeelineRefreshesCachedRegistrationMissingServiceRoute(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	sipConf := sipOutboundConfig{
+		address: "ip.beeline.ru:5060",
+		host:    "ip.beeline.ru",
+		user:    mockAuthUser,
+		pass:    mockAuthPassword,
+	}
+	conf, err := resolveRegistrationConfig(sipConf)
+	require.NoError(t, err)
+	profile := outboundProviderProfileForAddress(sipConf.address)
+	conf.MaxAgeBeforeInvite = profile.MaxRegistrationAgeBeforeInvite
+	if profile.RouteRegistrationToRegistrar {
+		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
+	}
+
+	client.registrationManager.mu.Lock()
+	client.registrationManager.states[conf.cacheKey()] = &registrationState{
+		expiresAt:        time.Now().Add(2 * time.Minute),
+		lastSuccessAt:    time.Now(),
+		identityKey:      conf.identityCacheKey(),
+		looseIdentityKey: conf.looseIdentityCacheKey(),
+	}
+	client.registrationManager.mu.Unlock()
+
+	type ensureResult struct {
+		conf *ResolvedRegistrationConfig
+		err  error
+	}
+	done := make(chan ensureResult, 1)
+	go func() {
+		regConf, err := client.ensureRegistered(context.Background(), sipConf)
+		done <- ensureResult{conf: regConf, err: err}
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+
+	res := <-done
+	require.NoError(t, res.err)
+	require.Equal(t, []string{
+		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
+	}, res.conf.ServiceRouteHeaders)
+}
+
+func TestEnsureRegisteredBeelineAllowsFreshRegistrationWithoutServiceRoute(t *testing.T) {
+	client := NewOutboundTestClient(t, TestClientConfig{})
+	sipClient := getCreatedSIPClient(t)
+
+	type ensureResult struct {
+		conf *ResolvedRegistrationConfig
+		err  error
+	}
+	done := make(chan ensureResult, 1)
+	go func() {
+		conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: "ip.beeline.ru:5060",
+			host:    "ip.beeline.ru",
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+		})
+		done <- ensureResult{conf: conf, err: err}
+	}()
+
+	tx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	ok := sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Expires", "150"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+
+	res := <-done
+	require.NoError(t, res.err)
+	require.NotNil(t, res.conf)
+	require.Empty(t, res.conf.ServiceRouteHeaders)
+}
+
+func TestEnsureRegisteredBeelineDoesNotUseCachedServiceRouteWithoutPassword(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -230,18 +302,11 @@ func TestEnsureRegisteredUsesCachedServiceRouteWithoutPassword(t *testing.T) {
 		host:    "81.29.140.248",
 		from:    mockAuthUser,
 		routeHeaders: []string{
-			"<sip:ip.beeline.ru:5060;transport=udp;lr>",
+			"<sip:212.119.246.230:5060;transport=udp;lr>",
 		},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, cachedConf)
-	require.Equal(t, mockAuthUser, cachedConf.AuthUsername)
-	require.Equal(t, []string{
-		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
-	}, cachedConf.ServiceRouteHeaders)
-	require.Equal(t, []string{
-		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
-	}, registeredInviteRouteHeaders(cachedConf.RouteHeaders, cachedConf, true))
+	require.Nil(t, cachedConf)
 
 	select {
 	case tx = <-sipClient.transactions:

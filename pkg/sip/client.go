@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -56,6 +57,23 @@ func DefaultGetSipClientFunc(ua *sipgo.UserAgent, options ...sipgo.ClientOption)
 	return sipgo.NewClient(ua, options...)
 }
 
+type RegistrarResolver func(context.Context, string) ([]netip.Addr, error)
+
+func defaultRegistrarResolver(ctx context.Context, host string) ([]netip.Addr, error) {
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		addr, ok := netip.AddrFromSlice(ip.IP)
+		if ok {
+			addrs = append(addrs, addr.Unmap())
+		}
+	}
+	return addrs, nil
+}
+
 type Client struct {
 	conf   *config.Config
 	sconf  *ServiceConfig
@@ -72,10 +90,11 @@ type Client struct {
 
 	registrationManager *RegistrationManager
 
-	handler      Handler
-	getIOClient  GetIOInfoClient
-	getSipClient GetSipClientFunc
-	getRoom      GetRoomFunc
+	handler          Handler
+	getIOClient      GetIOInfoClient
+	getSipClient     GetSipClientFunc
+	getRoom          GetRoomFunc
+	resolveRegistrar RegistrarResolver
 }
 
 const internalCreateSIPParticipantRegisterModeField protowire.Number = 34
@@ -147,6 +166,14 @@ func WithGetRoomClient(fn GetRoomFunc) ClientOption {
 	}
 }
 
+func WithRegistrarResolver(fn RegistrarResolver) ClientOption {
+	return func(c *Client) {
+		if fn != nil {
+			c.resolveRegistrar = fn
+		}
+	}
+}
+
 func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats.Monitor, getIOClient GetIOInfoClient, options ...ClientOption) *Client {
 	if log == nil {
 		log = logger.GetLogger()
@@ -160,6 +187,7 @@ func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats
 		registrationManager: NewRegistrationManager(),
 		getSipClient:        DefaultGetSipClientFunc,
 		getRoom:             DefaultGetRoomFunc,
+		resolveRegistrar:    defaultRegistrarResolver,
 		activeCalls:         make(map[LocalTag]*outboundCall),
 		trunkQueues:         newOutboundTrunkQueueManager(mon),
 	}

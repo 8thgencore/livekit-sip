@@ -1,7 +1,6 @@
 package sip
 
 import (
-	"net"
 	"strings"
 	"time"
 )
@@ -15,6 +14,8 @@ type outboundProviderProfile struct {
 	DefaultG711Only                       bool
 	RouteRegisteredInviteToRegistrar      bool
 	RouteRegistrationToRegistrar          bool
+	ResolveRegistrationToIP               bool
+	DisableRegistrationCache              bool
 	AlwaysRefreshRegistrationBeforeInvite bool
 	MaxRegistrationAgeBeforeInvite        time.Duration
 	RegisterInviteSettlingDelay           time.Duration
@@ -30,79 +31,18 @@ const (
 )
 
 var universalOutboundProviderProfile = outboundProviderProfile{
-	ID:                                  "universal",
-	AllowRegisteredInviteDirectFallback: true,
-	OutboundQueueScope:                  outboundProviderQueueScopeTrunk,
-	OutboundMaxConcurrentCalls:          outboundPerTrunkMaxConcurrentCalls,
-}
-
-var outboundProviderDomainProfiles = map[string]outboundProviderProfile{
-	"telphin.ru": {
-		ID:                                  "telphin",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"telphin.com": {
-		ID:                                  "telphin",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"novofon.ru": {
-		ID:                             "novofon",
-		SkipRegistrationInAuto:         true,
-		DirectAuthFailureIsConfigError: true,
-		DefaultG711Only:                true,
-	},
-	"uiscom.ru": {
-		ID:                                  "uiscom",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"plusofon.ru": {
-		ID:                                  "plusofon",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"megapbx.ru": {
-		ID:                                  "megapbx",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"mtt.ru": {
-		ID:                                  "mtt",
-		AllowRegisteredInviteDirectFallback: true,
-		DefaultG711Only:                     true,
-	},
-	"mangosip.ru": {
-		ID:                                  "mangosip",
-		AllowRegisteredInviteDirectFallback: true,
-	},
-	"ip.beeline.ru": {
-		ID:                               "beeline",
-		DefaultG711Only:                  true,
-		RouteRegisteredInviteToRegistrar: true,
-		RouteRegistrationToRegistrar:     true,
-		MaxRegistrationAgeBeforeInvite:   30 * time.Second,
-		RegisterInviteSettlingDelay:      3 * time.Second,
-	},
-	"sipuni.ru": {
-		ID:                                  "sipuni",
-		AllowRegisteredInviteDirectFallback: true,
-		DeleteTrunkAfterCall:                true,
-		DefaultG711Only:                     true,
-		OutboundQueueScope:                  outboundProviderQueueScopeProviderFrom,
-		OutboundMaxConcurrentCalls:          1,
-	},
+	ID:                                    "universal",
+	AllowRegisteredInviteDirectFallback:   true,
+	DefaultG711Only:                       true,
+	RouteRegistrationToRegistrar:          true,
+	ResolveRegistrationToIP:               true,
+	DisableRegistrationCache:              true,
+	AlwaysRefreshRegistrationBeforeInvite: true,
+	OutboundQueueScope:                    outboundProviderQueueScopeTrunk,
+	OutboundMaxConcurrentCalls:            outboundPerTrunkMaxConcurrentCalls,
 }
 
 func outboundProviderProfileForAddress(address string) outboundProviderProfile {
-	host := normalizeSIPHost(address)
-	for domain, profile := range outboundProviderDomainProfiles {
-		if host == domain || strings.HasSuffix(host, "."+domain) {
-			profile.applyDefaults()
-			return profile
-		}
-	}
 	profile := universalOutboundProviderProfile
 	profile.applyDefaults()
 	return profile
@@ -119,22 +59,4 @@ func (p *outboundProviderProfile) applyDefaults() {
 
 func ShouldDeleteOutboundTrunkAfterCall(address string) bool {
 	return strings.TrimSpace(address) != ""
-}
-
-func normalizeSIPHost(address string) string {
-	host := strings.ToLower(strings.TrimSpace(address))
-	host = strings.TrimPrefix(host, "sip:")
-	host = strings.TrimPrefix(host, "sips:")
-	if i := strings.Index(host, ";"); i >= 0 {
-		host = host[:i]
-	}
-	if i := strings.LastIndex(host, "@"); i >= 0 {
-		host = host[i+1:]
-	}
-	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
-		host = parsedHost
-	} else if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	return strings.ToLower(strings.TrimSuffix(host, "."))
 }

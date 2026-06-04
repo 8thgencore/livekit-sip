@@ -160,91 +160,42 @@ func sendTestResponse(t *testing.T, tx *transactionRequest, resp *sip.Response) 
 }
 
 func TestOutboundProviderProfileResolution(t *testing.T) {
-	telphin := outboundProviderProfileForAddress("teleo.telphin.ru:5068")
-	require.Equal(t, "telphin", telphin.ID)
-	require.False(t, telphin.SkipRegistrationInAuto)
-	require.True(t, telphin.AllowRegisteredInviteDirectFallback)
-	require.True(t, telphin.DefaultG711Only)
+	addresses := []string{
+		"teleo.telphin.ru:5068",
+		"vip1.sip.telphin.com:5060",
+		"SIP.NOVOFON.RU:5060",
+		"proxy.sip.novofon.ru:5060",
+		"pbx.uiscom.ru.",
+		"160907.voice.plusofon.ru:5060",
+		"company.megapbx.ru:5060",
+		"mtt.ru:5060",
+		"ip.beeline.ru:5060",
+		"ip.beeline.ru:5060;transport=udp",
+		"voip.sipuni.ru:5060",
+		"sip.unknown.example:5060",
+		"evilnovofon.ru:5060",
+	}
 
-	telphinSIP := outboundProviderProfileForAddress("vip1.sip.telphin.com:5060")
-	require.Equal(t, "telphin", telphinSIP.ID)
-	require.True(t, telphinSIP.DefaultG711Only)
-
-	novofon := outboundProviderProfileForAddress("SIP.NOVOFON.RU:5060")
-	require.Equal(t, "novofon", novofon.ID)
-	require.True(t, novofon.SkipRegistrationInAuto)
-	require.True(t, novofon.DirectAuthFailureIsConfigError)
-	require.True(t, novofon.DefaultG711Only)
-
-	novofonSubdomain := outboundProviderProfileForAddress("proxy.sip.novofon.ru:5060")
-	require.Equal(t, "novofon", novofonSubdomain.ID)
-	require.True(t, novofonSubdomain.SkipRegistrationInAuto)
-
-	uiscom := outboundProviderProfileForAddress("pbx.uiscom.ru.")
-	require.Equal(t, "uiscom", uiscom.ID)
-	require.False(t, uiscom.SkipRegistrationInAuto)
-	require.True(t, uiscom.AllowRegisteredInviteDirectFallback)
-	require.False(t, uiscom.DeleteTrunkAfterCall)
-	require.True(t, uiscom.DefaultG711Only)
-	require.True(t, ShouldDeleteOutboundTrunkAfterCall("pbx.uiscom.ru:5060"))
-
-	plusofon := outboundProviderProfileForAddress("160907.voice.plusofon.ru:5060")
-	require.Equal(t, "plusofon", plusofon.ID)
-	require.False(t, plusofon.SkipRegistrationInAuto)
-	require.True(t, plusofon.AllowRegisteredInviteDirectFallback)
-	require.False(t, plusofon.DeleteTrunkAfterCall)
-	require.True(t, plusofon.DefaultG711Only)
-	require.Equal(t, outboundProviderQueueScopeTrunk, plusofon.OutboundQueueScope)
-	require.Equal(t, 1, plusofon.OutboundMaxConcurrentCalls)
-
-	megapbx := outboundProviderProfileForAddress("company.megapbx.ru:5060")
-	require.Equal(t, "megapbx", megapbx.ID)
-	require.False(t, megapbx.SkipRegistrationInAuto)
-	require.True(t, megapbx.AllowRegisteredInviteDirectFallback)
-	require.False(t, megapbx.DeleteTrunkAfterCall)
-	require.True(t, megapbx.DefaultG711Only)
-
-	mtt := outboundProviderProfileForAddress("mtt.ru:5060")
-	require.Equal(t, "mtt", mtt.ID)
-	require.True(t, mtt.AllowRegisteredInviteDirectFallback)
-	require.True(t, mtt.DefaultG711Only)
-
-	beeline := outboundProviderProfileForAddress("ip.beeline.ru:5060")
-	require.Equal(t, "beeline", beeline.ID)
-	require.True(t, beeline.DefaultG711Only)
-	require.True(t, beeline.RouteRegisteredInviteToRegistrar)
-	require.True(t, beeline.RouteRegistrationToRegistrar)
-	require.False(t, beeline.AlwaysRefreshRegistrationBeforeInvite)
-	require.Equal(t, 30*time.Second, beeline.MaxRegistrationAgeBeforeInvite)
-	require.Equal(t, 3*time.Second, beeline.RegisterInviteSettlingDelay)
-
-	beelineWithTransport := outboundProviderProfileForAddress("ip.beeline.ru:5060;transport=udp")
-	require.Equal(t, "beeline", beelineWithTransport.ID)
-	require.False(t, beelineWithTransport.AlwaysRefreshRegistrationBeforeInvite)
-	require.Equal(t, 30*time.Second, beelineWithTransport.MaxRegistrationAgeBeforeInvite)
-
-	sipuni := outboundProviderProfileForAddress("voip.sipuni.ru:5060")
-	require.Equal(t, "sipuni", sipuni.ID)
-	require.False(t, sipuni.SkipRegistrationInAuto)
-	require.True(t, sipuni.AllowRegisteredInviteDirectFallback)
-	require.True(t, sipuni.DeleteTrunkAfterCall)
-	require.True(t, sipuni.DefaultG711Only)
-	require.Equal(t, outboundProviderQueueScopeProviderFrom, sipuni.OutboundQueueScope)
-	require.Equal(t, 1, sipuni.OutboundMaxConcurrentCalls)
-	require.True(t, ShouldDeleteOutboundTrunkAfterCall("voip.sipuni.ru:5060"))
-
-	unknown := outboundProviderProfileForAddress("sip.unknown.example:5060")
-	require.Equal(t, "universal", unknown.ID)
-	require.False(t, unknown.SkipRegistrationInAuto)
-	require.True(t, unknown.AllowRegisteredInviteDirectFallback)
-	require.False(t, unknown.DeleteTrunkAfterCall)
-	require.Equal(t, outboundProviderQueueScopeTrunk, unknown.OutboundQueueScope)
-	require.Equal(t, 1, unknown.OutboundMaxConcurrentCalls)
-	require.True(t, ShouldDeleteOutboundTrunkAfterCall("sip.unknown.example:5060"))
+	for _, address := range addresses {
+		profile := outboundProviderProfileForAddress(address)
+		require.Equal(t, "universal", profile.ID, address)
+		require.False(t, profile.SkipRegistrationInAuto, address)
+		require.True(t, profile.AllowRegisteredInviteDirectFallback, address)
+		require.False(t, profile.DirectAuthFailureIsConfigError, address)
+		require.False(t, profile.DeleteTrunkAfterCall, address)
+		require.True(t, profile.DefaultG711Only, address)
+		require.False(t, profile.RouteRegisteredInviteToRegistrar, address)
+		require.True(t, profile.RouteRegistrationToRegistrar, address)
+		require.True(t, profile.ResolveRegistrationToIP, address)
+		require.True(t, profile.DisableRegistrationCache, address)
+		require.True(t, profile.AlwaysRefreshRegistrationBeforeInvite, address)
+		require.Zero(t, profile.MaxRegistrationAgeBeforeInvite, address)
+		require.Zero(t, profile.RegisterInviteSettlingDelay, address)
+		require.Equal(t, outboundProviderQueueScopeTrunk, profile.OutboundQueueScope, address)
+		require.Equal(t, 1, profile.OutboundMaxConcurrentCalls, address)
+		require.True(t, ShouldDeleteOutboundTrunkAfterCall(address), address)
+	}
 	require.False(t, ShouldDeleteOutboundTrunkAfterCall(""))
-
-	nearMiss := outboundProviderProfileForAddress("evilnovofon.ru:5060")
-	require.Equal(t, "universal", nearMiss.ID)
 }
 
 func TestOutboundProviderMediaProfileRestrictsProviderDefaultsToG711(t *testing.T) {
@@ -712,7 +663,7 @@ func TestRetryInviteAfterServiceNotAuthorisedReregistersAndUsesServiceRoute(t *t
 		c:                                client,
 		log:                              logger.GetLogger(),
 		configuredRouteHeaders:           []string{"<sip:configured-proxy.example.com;lr>"},
-		routeHeaders:                     []string{"<sip:configured-proxy.example.com;lr>", "<sip:ip.beeline.ru:5060;transport=udp;lr>"},
+		routeHeaders:                     []string{"<sip:configured-proxy.example.com;lr>", "<sip:212.119.246.230:5060;transport=udp;lr>"},
 		routeRegisteredInviteToRegistrar: true,
 	}
 	req := sip.NewRequest(sip.INVITE, sip.Uri{Host: "ip.beeline.ru"})
@@ -1023,7 +974,7 @@ func TestOutboundInviteSkipsRegisterWhenDisabled(t *testing.T) {
 	require.Error(t, <-done)
 }
 
-func TestOutboundDisabledUsesCachedBeelineServiceRouteProfile(t *testing.T) {
+func TestOutboundDisabledDoesNotUseCachedBeelineServiceRouteProfile(t *testing.T) {
 	const registeredUser = "9063671384"
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
@@ -1052,11 +1003,7 @@ func TestOutboundDisabledUsesCachedBeelineServiceRouteProfile(t *testing.T) {
 		from:         registeredUser,
 		registerMode: outboundRegisterModeDisabled,
 	}, "", TransportUDP, logger.GetLogger())
-	require.NotNil(t, regProfile)
-	require.Equal(t, registeredUser, regProfile.AuthUsername)
-	require.Equal(t, []string{
-		"<sip:212.119.246.230:5060;transport=udp;lr;mpcftk=1-115-30c-8-4006a2a2>",
-	}, registeredInviteRouteHeaders(nil, regProfile, true))
+	require.Nil(t, regProfile)
 
 	select {
 	case tx := <-sipClient.transactions:
@@ -1065,7 +1012,7 @@ func TestOutboundDisabledUsesCachedBeelineServiceRouteProfile(t *testing.T) {
 	}
 }
 
-func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
+func TestOutboundInviteAutoRegistersForConfiguredHost(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -1084,13 +1031,17 @@ func TestOutboundInviteAutoSkipsRegisterForConfiguredHost(t *testing.T) {
 		done <- err
 	}()
 
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil))
+
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
 	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
+func TestOutboundInviteAutoRegistersForNovofon(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 	req := MinimalCreateSIPParticipantRequest()
@@ -1108,13 +1059,17 @@ func TestOutboundInviteAutoSkipsRegisterForNovofon(t *testing.T) {
 		done <- err
 	}()
 
+	registerTx := waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, registerTx.req.Method)
+	sendTestResponse(t, registerTx, sip.NewResponseFromRequest(registerTx.req, sip.StatusForbidden, "Forbidden", nil))
+
 	inviteTx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.INVITE, inviteTx.req.Method)
 	sendTestResponse(t, inviteTx, sip.NewResponseFromRequest(inviteTx.req, sip.StatusForbidden, "Forbidden", nil))
 	require.Error(t, <-done)
 }
 
-func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRetries(t *testing.T) {
+func TestOutboundInviteIPTrunk407ReturnsAuthMaxRetryAfterRetries(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -1125,7 +1080,7 @@ func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRet
 	req.Password = "test-password"
 	req.Number = "0101536"
 	req.WaitUntilAnswered = true
-	setOutboundRegisterMode(req, outboundRegisterModeAuto)
+	setOutboundRegisterMode(req, outboundRegisterModeDisabled)
 
 	done := make(chan error, 1)
 	go func() {
@@ -1150,9 +1105,7 @@ func TestOutboundInviteRegisterSkippedIPTrunk407ReturnsProviderAuthErrorAfterRet
 
 	err := <-done
 	require.Error(t, err)
-	var providerErr providerAuthConfigError
-	require.ErrorAs(t, err, &providerErr)
-	require.Equal(t, sip.StatusProxyAuthRequired, providerErr.status)
+	require.ErrorIs(t, err, ErrAuthMaxRetry)
 
 	select {
 	case retryTx := <-sipClient.transactions:

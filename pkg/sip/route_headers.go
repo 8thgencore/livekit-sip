@@ -70,5 +70,8 @@ func registrationRouteHeader(conf *ResolvedRegistrationConfig) string {
 		return ""
 	}
 	uri := conf.Registrar
+	if conf.RouteRegistrar.GetHost() != "" {
+		uri = conf.RouteRegistrar
+	}
 	return "<" + uri.GetURI().String() + ";lr>"
 }

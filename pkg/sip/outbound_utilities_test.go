@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -474,6 +475,7 @@ type TestClientConfig struct {
 	GetIOClient  GetIOInfoClient  // MockIOInfoClient if nil
 	GetSipClient GetSipClientFunc // NewTestClientFunc if nil
 	GetRoom      GetRoomFunc      // newTestRoom if nil
+	Resolver     RegistrarResolver
 }
 
 func NewOutboundTestClient(t testing.TB, cfg TestClientConfig) *Client {
@@ -533,7 +535,21 @@ func NewOutboundTestClient(t testing.TB, cfg TestClientConfig) *Client {
 	if cfg.GetRoom == nil {
 		cfg.GetRoom = newTestRoomConfig(nil)
 	}
-	client := NewClient(cfg.Region, cfg.Config, log, cfg.Monitor, cfg.GetIOClient, WithGetSipClient(cfg.GetSipClient), WithGetRoomClient(cfg.GetRoom))
+	if cfg.Resolver == nil {
+		cfg.Resolver = func(_ context.Context, host string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("212.119.246.230")}, nil
+		}
+	}
+	client := NewClient(
+		cfg.Region,
+		cfg.Config,
+		log,
+		cfg.Monitor,
+		cfg.GetIOClient,
+		WithGetSipClient(cfg.GetSipClient),
+		WithGetRoomClient(cfg.GetRoom),
+		WithRegistrarResolver(cfg.Resolver),
+	)
 	client.SetHandler(&TestHandler{})
 
 	// Set up service config with minimal values
