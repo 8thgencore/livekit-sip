@@ -34,6 +34,7 @@ var universalOutboundProviderProfile = outboundProviderProfile{
 	ID:                                    "universal",
 	AllowRegisteredInviteDirectFallback:   true,
 	DefaultG711Only:                       true,
+	RouteRegisteredInviteToRegistrar:      true,
 	RouteRegistrationToRegistrar:          true,
 	ResolveRegistrationToIP:               true,
 	DisableRegistrationCache:              true,

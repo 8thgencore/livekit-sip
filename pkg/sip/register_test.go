@@ -410,9 +410,10 @@ func TestEnsureRegisteredAddsConfiguredRouteHeadersInOrder(t *testing.T) {
 	tx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, tx.req.Method)
 	routeHeaders := tx.req.GetHeaders("Route")
-	require.Len(t, routeHeaders, 2)
+	require.Len(t, routeHeaders, 3)
 	require.Equal(t, routes[0], routeHeaders[0].Value())
 	require.Equal(t, routes[1], routeHeaders[1].Value())
+	require.Equal(t, "<sip:212.119.246.230:5060;transport=udp;lr>", routeHeaders[2].Value())
 	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
 	require.NoError(t, <-done)
 }
@@ -552,7 +553,7 @@ func TestResolveRegistrationConfigRequiresUser(t *testing.T) {
 	require.Contains(t, err.Error(), "auth username")
 }
 
-func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
+func TestEnsureRegisteredRefreshesSuccessfulRegistrationWithoutCache(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -572,21 +573,31 @@ func TestEnsureRegisteredCachesSuccessfulRegistration(t *testing.T) {
 	require.NoError(t, tx.transaction.SendResponse(ok))
 	require.NoError(t, <-done)
 
-	conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
-		address: mockRegistrarHost + ":5060",
-		host:    mockRegistrarHost,
-		user:    mockAuthUser,
-		pass:    mockAuthPassword,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, conf)
-	require.Equal(t, []string{"<sip:ims-edge.example.com;lr>"}, conf.ServiceRouteHeaders)
-
-	select {
-	case tx = <-sipClient.transactions:
-		t.Fatalf("unexpected extra REGISTER transaction: %v", tx.req.Method)
-	case <-time.After(100 * time.Millisecond):
+	type result struct {
+		conf *ResolvedRegistrationConfig
+		err  error
 	}
+	second := make(chan result, 1)
+	go func() {
+		conf, err := client.ensureRegistered(context.Background(), sipOutboundConfig{
+			address: mockRegistrarHost + ":5060",
+			host:    mockRegistrarHost,
+			user:    mockAuthUser,
+			pass:    mockAuthPassword,
+		})
+		second <- result{conf: conf, err: err}
+	}()
+
+	tx = waitTransaction(t, sipClient)
+	require.Equal(t, sip.REGISTER, tx.req.Method)
+	ok = sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)
+	ok.AppendHeader(sip.NewHeader("Service-Route", "<sip:ims-edge-refreshed.example.com;lr>"))
+	require.NoError(t, tx.transaction.SendResponse(ok))
+
+	res := <-second
+	require.NoError(t, res.err)
+	require.NotNil(t, res.conf)
+	require.Equal(t, []string{"<sip:ims-edge-refreshed.example.com;lr>"}, res.conf.ServiceRouteHeaders)
 }
 
 func TestForceRegisterBypassesCachedRegistration(t *testing.T) {

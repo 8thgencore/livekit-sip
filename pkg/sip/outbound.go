@@ -182,7 +182,7 @@ func (c *Client) newCall(ctx context.Context, tid traceid.ID, conf *config.Confi
 			regProfile = nil
 		}
 	}
-	if regProfile == nil && providerProfile.RouteRegisteredInviteToRegistrar {
+	if regProfile == nil && providerProfile.RouteRegisteredInviteToRegistrar && !providerProfile.DisableRegistrationCache {
 		regProfile = c.cachedRegisteredRouteProfile(ctx, sipConf, defaultHost, tr, log)
 	}
 	if regProfile != nil {
@@ -1419,8 +1419,8 @@ func registeredInviteRouteHeaders(configured []string, regProfile *ResolvedRegis
 		return cloneRouteHeaders(configured)
 	}
 	configuredRoutes := cloneRouteHeaders(configured)
-	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) != 0 {
-		configuredRoutes = removeRouteHeader(configuredRoutes, registrationRouteHeader(regProfile))
+	if routeRegisteredInviteToRegistrar {
+		configuredRoutes = removeRegistrationRouteHeaders(configuredRoutes, regProfile)
 	}
 	routes := appendRouteHeaders(configuredRoutes, regProfile.ServiceRouteHeaders)
 	if routeRegisteredInviteToRegistrar && len(regProfile.ServiceRouteHeaders) == 0 {
@@ -1429,19 +1429,43 @@ func registeredInviteRouteHeaders(configured []string, regProfile *ResolvedRegis
 	return routes
 }
 
-func removeRouteHeader(routes []string, remove string) []string {
-	remove = strings.TrimSpace(remove)
-	if len(routes) == 0 || remove == "" {
+func removeRegistrationRouteHeaders(routes []string, conf *ResolvedRegistrationConfig) []string {
+	if len(routes) == 0 || conf == nil {
 		return routes
 	}
+	remove := map[string]struct{}{}
+	for _, uri := range []URI{conf.Registrar, conf.RouteRegistrar} {
+		if host := uri.GetHost(); host != "" {
+			remove[strings.ToLower(host)] = struct{}{}
+		}
+	}
+	if len(remove) == 0 {
+		return routes
+	}
+
 	out := routes[:0]
 	for _, route := range routes {
-		if strings.TrimSpace(route) == remove {
+		if registrationRouteMatchesHost(route, remove) {
 			continue
 		}
 		out = append(out, route)
 	}
 	return out
+}
+
+func registrationRouteMatchesHost(route string, hosts map[string]struct{}) bool {
+	route = strings.ToLower(strings.TrimSpace(route))
+	if route == "" {
+		return false
+	}
+	for host := range hosts {
+		if strings.Contains(route, "@"+host) ||
+			strings.Contains(route, "sip:"+host) ||
+			strings.Contains(route, "sips:"+host) {
+			return true
+		}
+	}
+	return false
 }
 
 func serviceNotAuthorised(resp *sip.Response) bool {

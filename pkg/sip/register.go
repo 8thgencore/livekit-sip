@@ -99,6 +99,10 @@ func (m *RegistrationManager) ensure(ctx context.Context, c *Client, conf *Resol
 	if m == nil || conf == nil {
 		return nil
 	}
+	if conf.DisableCache {
+		_, err := c.register(ctx, conf, password, contact)
+		return err
+	}
 
 	key := conf.cacheKey()
 	for {
@@ -497,6 +501,7 @@ func (c *Client) ensureRegistered(ctx context.Context, sipConf sipOutboundConfig
 		}
 	}
 	if providerProfile.RouteRegistrationToRegistrar {
+		conf.RouteHeaders = removeRegistrationRouteHeaders(conf.RouteHeaders, conf)
 		conf.RouteHeaders = appendRouteHeaders(conf.RouteHeaders, []string{registrationRouteHeader(conf)})
 	}
 
