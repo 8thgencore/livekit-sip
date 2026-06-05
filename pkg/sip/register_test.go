@@ -410,10 +410,9 @@ func TestEnsureRegisteredAddsConfiguredRouteHeadersInOrder(t *testing.T) {
 	tx := waitTransaction(t, sipClient)
 	require.Equal(t, sip.REGISTER, tx.req.Method)
 	routeHeaders := tx.req.GetHeaders("Route")
-	require.Len(t, routeHeaders, 3)
+	require.Len(t, routeHeaders, 2)
 	require.Equal(t, routes[0], routeHeaders[0].Value())
 	require.Equal(t, routes[1], routeHeaders[1].Value())
-	require.Equal(t, "<sip:212.119.246.230:5060;transport=udp;lr>", routeHeaders[2].Value())
 	require.NoError(t, tx.transaction.SendResponse(sip.NewResponseFromRequest(tx.req, sip.StatusOK, "OK", nil)))
 	require.NoError(t, <-done)
 }
