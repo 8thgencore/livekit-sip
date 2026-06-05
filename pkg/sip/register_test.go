@@ -61,7 +61,7 @@ func TestEnsureRegisteredHandlesDigestChallenge(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
+func TestEnsureRegisteredDigestURIUsesNormalizedAuthURI(t *testing.T) {
 	client := NewOutboundTestClient(t, TestClientConfig{})
 	sipClient := getCreatedSIPClient(t)
 
@@ -96,7 +96,7 @@ func TestEnsureRegisteredDigestURIUsesRequestURIWithPort(t *testing.T) {
 	require.NotNil(t, authHeader)
 	cred, err := digest.ParseCredentials(authHeader.Value())
 	require.NoError(t, err)
-	require.Equal(t, firstTx.req.Recipient.String(), cred.URI)
+	require.Equal(t, "sip:voip.uiscom.ru", cred.URI)
 
 	require.NoError(t, secondTx.transaction.SendResponse(sip.NewResponseFromRequest(secondTx.req, sip.StatusOK, "OK", nil)))
 	require.NoError(t, <-done)

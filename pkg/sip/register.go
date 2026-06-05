@@ -734,10 +734,18 @@ func (c *Client) register(ctx context.Context, conf *ResolvedRegistrationConfig,
 		if err != nil {
 			return 0, fmt.Errorf("invalid register challenge %q: %w", challengeHeader.Value(), err)
 		}
-		digestURI := req.Recipient.String()
+		digestURI := strings.TrimSpace(conf.AuthURI)
 		if digestURI == "" {
-			digestURI = conf.AuthURI
+			digestURI = req.Recipient.String()
 		}
+		c.log.Infow("SIP REGISTER auth challenge parsed",
+			"attempt", attempt+1,
+			"registrar", conf.Registrar.GetDest(),
+			"realm", challenge.Realm,
+			"algorithm", challenge.Algorithm,
+			"qop", challenge.QOP,
+			"digestURI", digestURI,
+		)
 		cred, err := digest.Digest(challenge, digest.Options{
 			Method:   sip.REGISTER.String(),
 			URI:      digestURI,
