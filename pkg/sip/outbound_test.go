@@ -187,7 +187,7 @@ func TestOutboundProviderProfileResolution(t *testing.T) {
 		require.True(t, profile.DefaultG711Only, address)
 		require.True(t, profile.RouteRegisteredInviteToRegistrar, address)
 		require.True(t, profile.RouteRegistrationToRegistrar, address)
-		require.True(t, profile.ResolveRegistrationToIP, address)
+		require.False(t, profile.ResolveRegistrationToIP, address)
 		require.True(t, profile.DisableRegistrationCache, address)
 		require.True(t, profile.AlwaysRefreshRegistrationBeforeInvite, address)
 		require.Zero(t, profile.MaxRegistrationAgeBeforeInvite, address)

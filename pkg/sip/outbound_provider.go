@@ -36,7 +36,6 @@ var universalOutboundProviderProfile = outboundProviderProfile{
 	DefaultG711Only:                       true,
 	RouteRegisteredInviteToRegistrar:      true,
 	RouteRegistrationToRegistrar:          true,
-	ResolveRegistrationToIP:               true,
 	DisableRegistrationCache:              true,
 	AlwaysRefreshRegistrationBeforeInvite: true,
 	OutboundQueueScope:                    outboundProviderQueueScopeTrunk,
