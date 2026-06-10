@@ -72,13 +72,14 @@ const (
 )
 
 type AuthInfo struct {
-	Result       AuthResult
-	ProjectID    string
-	TrunkID      string
-	Auth         InboundAuth
-	RegisterAddr string
-	RegisterTr   livekit.SIPTransport
-	ProviderInfo *livekit.ProviderInfo
+	Result           AuthResult
+	ProjectID        string
+	TrunkID          string
+	Auth             InboundAuth
+	RegisterAddr     string
+	RegisterFromHost string
+	RegisterTr       livekit.SIPTransport
+	ProviderInfo     *livekit.ProviderInfo
 }
 
 type InboundAuth struct {

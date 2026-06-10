@@ -6,11 +6,13 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/sip/pkg/sip"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeSIPTrunkClient struct {
 	deleted []string
+	inbound []*livekit.SIPInboundTrunkInfo
 }
 
 func (f *fakeSIPTrunkClient) DeleteSIPTrunk(_ context.Context, in *livekit.DeleteSIPTrunkRequest) (*livekit.SIPTrunkInfo, error) {
@@ -19,7 +21,42 @@ func (f *fakeSIPTrunkClient) DeleteSIPTrunk(_ context.Context, in *livekit.Delet
 }
 
 func (f *fakeSIPTrunkClient) GetSIPInboundTrunksByIDs(_ context.Context, _ []string) ([]*livekit.SIPInboundTrunkInfo, error) {
-	return nil, nil
+	return f.inbound, nil
+}
+
+func TestEnrichRegisterFromInboundTrunkMetadataIncludesIdentityDomain(t *testing.T) {
+	svc := &Service{
+		log: logger.GetLogger(),
+		sipClient: &fakeSIPTrunkClient{
+			inbound: []*livekit.SIPInboundTrunkInfo{
+				{
+					SipTrunkId: "ST_test",
+					Metadata: `{
+						"sip_endpoint": {
+							"host": "nsk.ip.beeline.ru",
+							"port": 5060,
+							"transport": "udp",
+							"identity_domain": "ip.beeline.ru"
+						},
+						"auth_user": "9137842525"
+					}`,
+				},
+			},
+		},
+	}
+
+	info := sip.AuthInfo{
+		Result:  sip.AuthPassword,
+		TrunkID: "ST_test",
+		Auth:    sip.InboundAuth{Username: "old-user", Password: "secret"},
+	}
+
+	enriched := svc.enrichRegisterFromInboundTrunkMetadata(context.Background(), info)
+
+	require.Equal(t, "nsk.ip.beeline.ru:5060", enriched.RegisterAddr)
+	require.Equal(t, "ip.beeline.ru", enriched.RegisterFromHost)
+	require.Equal(t, livekit.SIPTransport_SIP_TRANSPORT_UDP, enriched.RegisterTr)
+	require.Equal(t, "9137842525", enriched.Auth.Username)
 }
 
 func TestOnSessionEndDeletesOutboundTrunkForAuthFailures(t *testing.T) {

@@ -22,9 +22,11 @@ type inboundRegisterSyncState struct {
 
 type inboundTrunkMetadata struct {
 	SIPEndpoint *struct {
-		Host      string `json:"host"`
-		Port      int    `json:"port"`
-		Transport string `json:"transport"`
+		Host           string `json:"host"`
+		Port           int    `json:"port"`
+		Transport      string `json:"transport"`
+		IdentityDomain string `json:"identity_domain"`
+		FromHost       string `json:"from_host"`
 	} `json:"sip_endpoint"`
 	AuthUser string `json:"auth_user"`
 }
@@ -150,13 +152,23 @@ func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *l
 		address = host + ":" + strconv.Itoa(meta.SIPEndpoint.Port)
 	}
 	auth := AuthInfo{
-		Result:       AuthPassword,
-		TrunkID:      trunk.GetSipTrunkId(),
-		Auth:         InboundAuth{Username: user, Password: pass},
-		RegisterAddr: address,
-		RegisterTr:   transportFromMetadata(meta.SIPEndpoint.Transport),
+		Result:           AuthPassword,
+		TrunkID:          trunk.GetSipTrunkId(),
+		Auth:             InboundAuth{Username: user, Password: pass},
+		RegisterAddr:     address,
+		RegisterFromHost: firstMetadataValue(meta.SIPEndpoint.IdentityDomain, meta.SIPEndpoint.FromHost),
+		RegisterTr:       transportFromMetadata(meta.SIPEndpoint.Transport),
 	}
 	s.srv.ensureInboundRegistered(ctx, s.log.WithValues("sipTrunk", trunk.GetSipTrunkId(), "mode", "trunk-sync"), auth)
+}
+
+func firstMetadataValue(values ...string) string {
+	for _, value := range values {
+		if normalized := strings.TrimSpace(value); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
 }
 
 func transportFromMetadata(v string) livekit.SIPTransport {

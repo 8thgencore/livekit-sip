@@ -136,6 +136,7 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 	regConf := sipOutboundConfig{
 		address:      auth.RegisterAddr,
 		transport:    auth.RegisterTr,
+		host:         auth.RegisterFromHost,
 		user:         auth.Auth.Username,
 		pass:         auth.Auth.Password,
 		registerMode: outboundRegisterModeAuto,
