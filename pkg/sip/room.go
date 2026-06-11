@@ -304,6 +304,9 @@ func (r *Room) Connect(ctx context.Context, conf *config.Config, rconf RoomConfi
 	if rconf.WsUrl == "" {
 		rconf.WsUrl = conf.WsUrl
 	}
+	if err := r.ensureRoomConfigured(ctx, conf, rconf); err != nil {
+		return err
+	}
 	partConf := rconf.Participant
 	r.p = ParticipantInfo{
 		RoomName: rconf.RoomName,
@@ -417,17 +420,7 @@ func (r *Room) Connect(ctx context.Context, conf *config.Config, rconf RoomConfi
 			}
 		}
 		var err error
-		rconf.Token, err = sip.BuildSIPToken(sip.SIPTokenParams{
-			APIKey:                conf.ApiKey,
-			APISecret:             conf.ApiSecret,
-			RoomName:              rconf.RoomName,
-			ParticipantIdentity:   partConf.Identity,
-			ParticipantName:       partConf.Name,
-			ParticipantMetadata:   partConf.Metadata,
-			ParticipantAttributes: tokenAttrs,
-			RoomPreset:            rconf.RoomPreset,
-			RoomConfig:            rconf.RoomConfig,
-		})
+		rconf.Token, err = buildSIPJoinToken(conf, rconf, partConf, tokenAttrs)
 		if err != nil {
 			return err
 		}
@@ -453,6 +446,62 @@ func (r *Room) Connect(ctx context.Context, conf *config.Config, rconf RoomConfi
 
 	// Not subscribing to any tracks just yet!
 	return nil
+}
+
+func (r *Room) ensureRoomConfigured(ctx context.Context, conf *config.Config, rconf RoomConfig) error {
+	if rconf.RoomPreset == "" && rconf.RoomConfig == nil {
+		return nil
+	}
+	if rconf.RoomName == "" {
+		return nil
+	}
+	req := createRoomRequestFromConfig(rconf)
+	_, err := lksdk.NewRoomServiceClient(rconf.WsUrl, conf.ApiKey, conf.ApiSecret).CreateRoom(ctx, req)
+	if err != nil {
+		return errors.Wrap(err, "create room with SIP dispatch configuration")
+	}
+	r.log.Infow("ensured room configuration before SIP join",
+		"room", rconf.RoomName,
+		"roomPreset", rconf.RoomPreset,
+		"agents", len(req.Agents),
+	)
+	return nil
+}
+
+func createRoomRequestFromConfig(rconf RoomConfig) *livekit.CreateRoomRequest {
+	req := &livekit.CreateRoomRequest{
+		Name:       rconf.RoomName,
+		RoomPreset: rconf.RoomPreset,
+	}
+	applyRoomConfiguration(req, rconf.RoomConfig)
+	return req
+}
+
+func applyRoomConfiguration(req *livekit.CreateRoomRequest, conf *livekit.RoomConfiguration) {
+	if conf == nil {
+		return
+	}
+	req.Agents = conf.Agents
+	req.Egress = conf.Egress
+	req.EmptyTimeout = conf.EmptyTimeout
+	req.DepartureTimeout = conf.DepartureTimeout
+	req.MaxParticipants = conf.MaxParticipants
+	req.MinPlayoutDelay = conf.MinPlayoutDelay
+	req.MaxPlayoutDelay = conf.MaxPlayoutDelay
+	req.SyncStreams = conf.SyncStreams
+	req.Metadata = conf.Metadata
+}
+
+func buildSIPJoinToken(conf *config.Config, rconf RoomConfig, partConf ParticipantConfig, tokenAttrs map[string]string) (string, error) {
+	return sip.BuildSIPToken(sip.SIPTokenParams{
+		APIKey:                conf.ApiKey,
+		APISecret:             conf.ApiSecret,
+		RoomName:              rconf.RoomName,
+		ParticipantIdentity:   partConf.Identity,
+		ParticipantName:       partConf.Name,
+		ParticipantMetadata:   partConf.Metadata,
+		ParticipantAttributes: tokenAttrs,
+	})
 }
 
 func (r *Room) Subscribe() {
