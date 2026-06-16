@@ -126,12 +126,12 @@ func (s *Server) getCallInfo(id LocalTag) *inboundCallInfo {
 	return c
 }
 
-func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) bool {
+func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger, auth AuthInfo) (bool, error) {
 	if s == nil || s.cli == nil {
-		return false
+		return false, nil
 	}
 	if auth.Auth.Username == "" || auth.Auth.Password == "" || auth.RegisterAddr == "" {
-		return false
+		return false, nil
 	}
 	regConf := sipOutboundConfig{
 		address:      auth.RegisterAddr,
@@ -151,7 +151,7 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 			"transport", TransportFrom(regConf.transport),
 			"authUser", auth.Auth.Username,
 		)
-		return false
+		return false, err
 	}
 	if conf != nil {
 		log.Infow("SIP inbound REGISTER ensured",
@@ -159,9 +159,9 @@ func (s *Server) ensureInboundRegistered(ctx context.Context, log logger.Logger,
 			"transport", conf.Transport,
 			"authUser", conf.AuthUsername,
 		)
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 func (s *Server) onInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
@@ -345,7 +345,7 @@ func (s *Server) processInvite(req *sip.Request, tx sip.ServerTransaction) (retE
 		cc.RespondAndDrop(sip.StatusNotFound, "No trunk found")
 		return psrpc.NewErrorf(psrpc.NotFound, "no trunk found for call")
 	case AuthPassword:
-		registered := s.ensureInboundRegistered(ctx, log, r)
+		registered, _ := s.ensureInboundRegistered(ctx, log, r)
 		if s.conf.HideInboundPort {
 			// We will send password request anyway, so might as well signal that the progress is made.
 			cc.Processing()

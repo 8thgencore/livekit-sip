@@ -14,6 +14,12 @@ import (
 
 const inboundRegisterSyncInterval = 5 * time.Second
 const inboundRegisterEnsureInterval = 2 * time.Minute
+const maxAuthRegisterRetryError = "max auth retry attempts reached for SIP register"
+
+type inboundRegisterSIPClient interface {
+	ListSIPInboundTrunk(ctx context.Context, in *livekit.ListSIPInboundTrunkRequest) (*livekit.ListSIPInboundTrunkResponse, error)
+	DeleteSIPTrunk(ctx context.Context, in *livekit.DeleteSIPTrunkRequest) (*livekit.SIPTrunkInfo, error)
+}
 
 type inboundRegisterSyncState struct {
 	fingerprint string
@@ -73,7 +79,7 @@ func (s *Service) startInboundRegisterSync() {
 	}()
 }
 
-func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *lksdk.SIPClient, states map[string]inboundRegisterSyncState) {
+func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient inboundRegisterSIPClient, states map[string]inboundRegisterSyncState) {
 	resp, err := sipClient.ListSIPInboundTrunk(ctx, &livekit.ListSIPInboundTrunkRequest{})
 	if err != nil {
 		s.log.Warnw("failed to list inbound trunks for REGISTER sync", err)
@@ -101,7 +107,12 @@ func (s *Service) syncInboundTrunksForRegister(ctx context.Context, sipClient *l
 		if !changed && nextTickAt.Before(st.nextEnsure) {
 			continue
 		}
-		s.registerInboundTrunkFromMetadata(ctx, trunk)
+		if err := s.registerInboundTrunkFromMetadata(ctx, trunk); isMaxAuthRegisterRetry(err) {
+			s.deleteInboundTrunkAfterRegisterAuthFailure(ctx, sipClient, id, err)
+			delete(active, id)
+			delete(states, id)
+			continue
+		}
 		states[id] = inboundRegisterSyncState{
 			fingerprint: fingerprint,
 			nextEnsure:  now.Add(inboundRegisterEnsureInterval + inboundRegisterJitter(id)),
@@ -122,29 +133,29 @@ func inboundRegisterJitter(trunkID string) time.Duration {
 	return time.Duration(h.Sum32()%30) * time.Second
 }
 
-func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *livekit.SIPInboundTrunkInfo) {
+func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *livekit.SIPInboundTrunkInfo) error {
 	metaRaw := strings.TrimSpace(trunk.GetMetadata())
 	if metaRaw == "" {
-		return
+		return nil
 	}
 	var meta inboundTrunkMetadata
 	if err := json.Unmarshal([]byte(metaRaw), &meta); err != nil || meta.SIPEndpoint == nil {
-		return
+		return nil
 	}
 	host := strings.TrimSpace(meta.SIPEndpoint.Host)
 	if host == "" {
-		return
+		return nil
 	}
 	pass := trunk.GetAuthPassword()
 	if pass == "" {
-		return
+		return nil
 	}
 	user := strings.TrimSpace(meta.AuthUser)
 	if user == "" {
 		user = trunk.GetAuthUsername()
 	}
 	if user == "" {
-		return
+		return nil
 	}
 
 	address := host
@@ -159,7 +170,28 @@ func (s *Service) registerInboundTrunkFromMetadata(ctx context.Context, trunk *l
 		RegisterFromHost: firstMetadataValue(meta.SIPEndpoint.IdentityDomain, meta.SIPEndpoint.FromHost),
 		RegisterTr:       transportFromMetadata(meta.SIPEndpoint.Transport),
 	}
-	s.srv.ensureInboundRegistered(ctx, s.log.WithValues("sipTrunk", trunk.GetSipTrunkId(), "mode", "trunk-sync"), auth)
+	_, err := s.srv.ensureInboundRegistered(ctx, s.log.WithValues("sipTrunk", trunk.GetSipTrunkId(), "mode", "trunk-sync"), auth)
+	return err
+}
+
+func isMaxAuthRegisterRetry(err error) bool {
+	return err != nil && strings.Contains(err.Error(), maxAuthRegisterRetryError)
+}
+
+func (s *Service) deleteInboundTrunkAfterRegisterAuthFailure(ctx context.Context, sipClient inboundRegisterSIPClient, trunkID string, cause error) {
+	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, err := sipClient.DeleteSIPTrunk(deleteCtx, &livekit.DeleteSIPTrunkRequest{SipTrunkId: trunkID}); err != nil {
+		s.log.Warnw("failed to delete inbound SIP trunk after REGISTER auth failure", err,
+			"sipTrunk", trunkID,
+			"cause", cause,
+		)
+		return
+	}
+	s.log.Infow("deleted inbound SIP trunk after REGISTER auth failure",
+		"sipTrunk", trunkID,
+		"cause", cause,
+	)
 }
 
 func firstMetadataValue(values ...string) string {
